@@ -89,7 +89,8 @@ class UnifiedLLMClient:
 
     def _chat_ollama(self, messages, temp, tokens, json_mode, model):
         import ollama
-        kwargs = {"options": {"temperature": temp, "num_predict": tokens}}
+        # Cap num_ctx to 4096 to prevent giant KV cache allocations from overflowing VRAM/RAM
+        kwargs = {"options": {"temperature": temp, "num_predict": tokens, "num_ctx": 4096}}
         if json_mode:
             kwargs["format"] = "json"
         if model.startswith("qwen3:"):
@@ -105,7 +106,7 @@ class UnifiedLLMClient:
         """Timeout-guarded HTTP call (the ollama pkg has no timeout kwarg)."""
         payload = {
             "model": model, "messages": messages, "stream": False,
-            "options": {"temperature": temp, "num_predict": tokens},
+            "options": {"temperature": temp, "num_predict": tokens, "num_ctx": 4096},
         }
         if json_mode:
             payload["format"] = "json"

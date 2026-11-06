@@ -16,6 +16,7 @@ Outputs:
   - Citation precision of [Evidence i] tags against retrieved items
 """
 
+import gc
 import json
 import logging
 import os
@@ -24,6 +25,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+import torch
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -861,6 +863,11 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
             upload_checkpoint_artifact(
                 [checkpoint_path, question_cache_path]
             )
+
+        # Proactive memory cleanup after each sample to avoid OOM killer
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # Aggregate from the checkpoint so resumed runs include previously
     # evaluated questions of this sample set.

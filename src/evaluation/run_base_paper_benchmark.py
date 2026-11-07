@@ -548,6 +548,23 @@ def generate_paper_protocol_questions(num_samples: int, generator=None,
         raise ValueError(f"pool must be 'test' or 'dev', got {pool!r}")
     cache_path = _paper_question_cache_path(num_samples, pool)
     legacy_path = RESULTS_DIR / f"paper_questions_n{num_samples}_seed{RANDOM_SEED}.json"
+    # Pool-drift guard: silently regenerating questions produces a NEW
+    # question_set_id and breaks comparability with every prior run (observed
+    # 2026-11-07, when a non-fatal artifact restore left the cache missing).
+    # HCAD_REQUIRE_QUESTION_CACHE=1 (set by the notebook benchmark cells)
+    # fails loudly instead of regenerating.
+    if not cache_path.exists() and not legacy_path.exists():
+        msg = (
+            f"No cached {pool}-pool question set at {cache_path} - generating "
+            f"fresh questions would change question_set_id and invalidate "
+            f"comparability with prior runs. Restore the artifacts dataset "
+            f"(which carries results/paper_questions_*.json) or set "
+            f"HCAD_ALLOW_QUESTION_REGEN=1 to accept a new pool."
+        )
+        if os.environ.get("HCAD_REQUIRE_QUESTION_CACHE", "0") == "1" and \
+                os.environ.get("HCAD_ALLOW_QUESTION_REGEN", "0") != "1":
+            raise RuntimeError(msg)
+        logger.warning("QUESTION CACHE MISSING - %s", msg)
     if cache_path.exists():
         try:
             with open(cache_path, "r", encoding="utf-8") as f:

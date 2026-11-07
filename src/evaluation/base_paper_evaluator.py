@@ -187,6 +187,18 @@ class BasePaperEvaluator:
             self.judge = UnifiedLLMClient(model=JUDGE_HF_MODEL, temperature=0.0, max_tokens=768)
         else:
             self.judge = judge_llm
+        # Judge-health accounting: a judge that cannot parse the rubric
+        # emits neutral fallbacks (50.0 scores / Tie winners). Counted so
+        # the benchmark can fail loudly instead of shipping a run whose
+        # every score is a fallback constant.
+        self.judge_calls = 0
+        self.judge_fallbacks = 0
+
+    @property
+    def judge_fallback_rate(self) -> float:
+        if self.judge_calls == 0:
+            return 0.0
+        return self.judge_fallbacks / self.judge_calls
 
     def _extract_json(self, raw_text: str) -> Dict[str, Any]:
         """Robustly extract JSON payload from LLM markdown fences or raw strings."""
@@ -384,6 +396,7 @@ class BasePaperEvaluator:
 
         for attempt in range(max(1, retries + 1)):
             try:
+                self.judge_calls += 1
                 raw_response = self.judge.chat(messages, temperature=0.0)
                 data = self._extract_json(raw_response)
                 logger.debug("Judge raw evaluation response: %s", raw_response)
@@ -431,6 +444,7 @@ class BasePaperEvaluator:
                 )
 
         if fallback_on_error:
+            self.judge_fallbacks += 1
             logger.warning(
                 "All scoring attempts failed (%s); returning neutral 50.0 fallback scores.",
                 last_exc,
@@ -484,6 +498,7 @@ class BasePaperEvaluator:
 
         for attempt in range(max(1, retries + 1)):
             try:
+                self.judge_calls += 1
                 raw_response = self.judge.chat(messages, temperature=0.0)
                 data = self._extract_json(raw_response)
 
@@ -547,6 +562,7 @@ class BasePaperEvaluator:
                 )
 
         if fallback_on_error:
+            self.judge_fallbacks += 1
             logger.warning(
                 "All selection attempts failed (%s); returning neutral Tie fallback.",
                 last_exc,

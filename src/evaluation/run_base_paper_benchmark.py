@@ -615,6 +615,46 @@ def generate_paper_protocol_questions(num_samples: int, generator=None,
     logger.info("Paper-protocol questions cached to %s (resume-safe).", cache_path)
     return samples
 
+def _judge_self_check(evaluator) -> None:
+    """Fail fast (minute 1, not hour 6) when the judge cannot parse its rubric.
+
+    A judge that does not emit parseable rubric JSON makes every scoring
+    call fall back to a neutral 50.0 and every selection call to Tie -
+    producing a full benchmark that looks like a result but measures
+    nothing (observed 2026-11-07 with a meditron:7b judge: all scores
+    49-50, 100% ties). This check runs ONE real scoring call with
+    fallback disabled; if it raises, the judge model is wrong for the
+    rubric and the run must not start.
+    """
+    expected = os.environ.get("HCAD_EXPECTED_JUDGE", "").strip() or None
+    judge_model = getattr(evaluator.judge, "model", "unknown")
+    logger.info("Judge model: %s (expected: %s)", judge_model, expected or "any")
+    if expected and judge_model != expected:
+        raise RuntimeError(
+            f"Judge model mismatch: expected HCAD_EXPECTED_JUDGE="
+            f"{expected!r}, got {judge_model!r}. Refusing to run: results "
+            f"are only comparable within one judge model."
+        )
+    try:
+        evaluator.evaluate_scoring(
+            "Is metformin contraindicated in severe renal failure?",
+            "Metformin is contraindicated in severe renal failure (eGFR < 30).",
+            "Metformin is contraindicated in severe renal failure.",
+            answer_evidence="Metformin is contraindicated in severe renal failure.",
+            retries=1,
+            fallback_on_error=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Judge self-check failed with model {judge_model!r}: {exc}. "
+            f"The judge cannot parse the scoring rubric, so every score "
+            f"would fall back to a neutral 50.0. Fix the judge model "
+            f"(protocol: qwen2.5:14b) or its prompt before running the "
+            f"benchmark - a full run of fallback scores is not a result."
+        ) from exc
+    logger.info("Judge self-check passed (model=%s).", judge_model)
+
+
 @tracked_run(
     name="base-paper-benchmark",
     job_type="benchmark",
@@ -627,6 +667,7 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
     """Execute complete base paper evaluation benchmark across the 3 systems."""
     logger.info("Initializing Base Paper Evaluator...")
     evaluator = BasePaperEvaluator()
+    _judge_self_check(evaluator)
 
     # Import system pipelines
     from src.baselines.baseline_llm import BaselineLLM
@@ -1051,6 +1092,11 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
         "judge": {
             "provider": evaluator.judge.provider,
             "model": evaluator.judge.model,
+            # Judge health: how many judge calls fell back to neutral
+            # constants. A high rate means the run measured nothing.
+            "calls": evaluator.judge_calls,
+            "fallbacks": evaluator.judge_fallbacks,
+            "fallback_rate": round(evaluator.judge_fallback_rate, 4),
         },
     }
 
@@ -1061,6 +1107,23 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
         json.dump(summary_results, f, indent=2)
 
     logger.info(f"Benchmark results successfully saved to {out_file}")
+
+    # Fail loud AFTER saving: a run with too many judge fallbacks is not a
+    # valid measurement (the 2026-11-07 meditron run produced 100%
+    # fallback scores and shipped a flat results file). run_checked in
+    # the notebook must see the non-zero exit.
+    max_rate = float(os.environ.get("HCAD_MAX_JUDGE_FALLBACK_RATE", "0.10"))
+    rate = evaluator.judge_fallback_rate
+    if rate > max_rate:
+        raise RuntimeError(
+            f"Judge fallback rate {rate:.1%} exceeds "
+            f"HCAD_MAX_JUDGE_FALLBACK_RATE={max_rate:.0%} "
+            f"({evaluator.judge_fallbacks}/{evaluator.judge_calls} calls "
+            f"fell back to neutral scores with judge "
+            f"{evaluator.judge.model!r}). Results were saved to {out_file} "
+            f"but are NOT a valid measurement - fix the judge model and "
+            f"re-run; do not report these numbers."
+        )
     return summary_results
 
 if __name__ == "__main__":

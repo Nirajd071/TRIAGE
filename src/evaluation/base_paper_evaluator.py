@@ -384,7 +384,7 @@ class BasePaperEvaluator:
 
         for attempt in range(max(1, retries + 1)):
             try:
-                raw_response = self.judge.chat(messages, temperature=0.0)
+                raw_response = self.judge.chat(messages, temperature=0.0, json_mode=True)
                 data = self._extract_json(raw_response)
                 logger.debug("Judge raw evaluation response: %s", raw_response)
                 logger.debug("Judge parsed data: %s", data)
@@ -484,7 +484,7 @@ class BasePaperEvaluator:
 
         for attempt in range(max(1, retries + 1)):
             try:
-                raw_response = self.judge.chat(messages, temperature=0.0)
+                raw_response = self.judge.chat(messages, temperature=0.0, json_mode=True)
                 data = self._extract_json(raw_response)
 
                 missing_criteria = [crit for crit in self.CRITERIA_LIST if crit not in data]

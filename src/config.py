@@ -326,8 +326,8 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")  # "nvidia", "huggingface", o
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Separate judge to avoid self-preference bias
 # Base-paper parity : 72B-class judge as in the paper's
-# protocol. Fits A100 80GB locally (Q4). Override to qwen3:14b for small GPUs.
-JUDGE_OLLAMA_MODEL = os.getenv("JUDGE_OLLAMA_MODEL", "qwen2.5:72b")
+# protocol. Fits A100 80GB locally (Q4). Override to gemma2:9b for T4 GPUs.
+JUDGE_OLLAMA_MODEL = os.getenv("JUDGE_OLLAMA_MODEL", "gemma2:9b")
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 # Text-optimized NIM models (vision-instruct variants underperform on clinical

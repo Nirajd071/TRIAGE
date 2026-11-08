@@ -37,12 +37,14 @@ class _OkJudge:
         })
 
 
-def test_self_check_passes_with_parseable_judge():
+def test_self_check_passes_with_parseable_judge(monkeypatch):
+    monkeypatch.delenv("HCAD_EXPECTED_JUDGE", raising=False)
     ev = BasePaperEvaluator(judge_llm=_OkJudge())
     _judge_self_check(ev)  # must not raise
 
 
-def test_self_check_fails_fast_with_broken_judge():
+def test_self_check_fails_fast_with_broken_judge(monkeypatch):
+    monkeypatch.delenv("HCAD_EXPECTED_JUDGE", raising=False)
     ev = BasePaperEvaluator(judge_llm=_BrokenJudge())
     with pytest.raises(RuntimeError, match="Judge self-check failed"):
         _judge_self_check(ev)

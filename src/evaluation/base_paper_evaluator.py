@@ -273,13 +273,23 @@ class BasePaperEvaluator:
                     rf'\*\*{key}\*\*\s*:?\s*([0-9]+(?:\.[0-9]+)?)',
                     # Score for key: Score for Comprehensiveness: 85
                     rf'(?:score|rating|level)\s*(?:for|of)?\s*{key}\s*:?\s*([0-9]+(?:\.[0-9]+)?)',
+                    # Level X (e.g. "Comprehensiveness: Level 4" or "Level 4 (60-80)")
+                    rf'(?:\b{key}\b|\*\*{key}\*\*)[^\n\r]*?\blevel\s*([1-5])\b',
+                    # Plain text: "Comprehensiveness 85" or "Comprehensiveness: 85/100"
+                    rf'(?:\b{key}\b|\*\*{key}\*\*)[^\n\r0-9]*?([0-9]+(?:\.[0-9]+)?)\s*(?:/\s*100|\b)',
                 ]
 
                 for pattern in patterns:
                     match = re.search(pattern, text, re.IGNORECASE)
                     if match:
                         try:
-                            score = float(match.group(1))
+                            raw_val = float(match.group(1))
+                            # If it was a Level 1-5 rating, map level to base paper 0-100 rubric midpoint
+                            if "level" in pattern and raw_val in {1.0, 2.0, 3.0, 4.0, 5.0}:
+                                level_map = {1.0: 20.0, 2.0: 40.0, 3.0: 60.0, 4.0: 80.0, 5.0: 95.0}
+                                score = level_map[raw_val]
+                            else:
+                                score = raw_val
                             res[key] = max(0.0, min(100.0, score))
                             break
                         except ValueError:
@@ -397,7 +407,7 @@ class BasePaperEvaluator:
         for attempt in range(max(1, retries + 1)):
             try:
                 self.judge_calls += 1
-                raw_response = self.judge.chat(messages, temperature=0.0)
+                raw_response = self.judge.chat(messages, temperature=0.0, json_mode=True)
                 data = self._extract_json(raw_response)
                 logger.debug("Judge raw evaluation response: %s", raw_response)
                 logger.debug("Judge parsed data: %s", data)
@@ -499,7 +509,7 @@ class BasePaperEvaluator:
         for attempt in range(max(1, retries + 1)):
             try:
                 self.judge_calls += 1
-                raw_response = self.judge.chat(messages, temperature=0.0)
+                raw_response = self.judge.chat(messages, temperature=0.0, json_mode=True)
                 data = self._extract_json(raw_response)
 
                 missing_criteria = [crit for crit in self.CRITERIA_LIST if crit not in data]

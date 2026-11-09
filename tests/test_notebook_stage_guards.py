@@ -10,7 +10,7 @@ NOTEBOOK = Path(__file__).resolve().parents[1] / "deploy" / "kaggle_triage.ipynb
 def test_notebook_checks_long_running_commands_and_full_test_suite():
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
     sources = {i: "".join(notebook["cells"][i]["source"])
-               for i in (1, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20)}
+               for i in (1, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20)}
 
     for cell, source in sources.items():
         assert "run_checked(" in source, f"cell {cell} bypasses checked subprocesses"
@@ -23,3 +23,7 @@ def test_notebook_checks_long_running_commands_and_full_test_suite():
     assert "fresh checkpoint" in sources[13]
     assert "retrieval-eval" in sources[14]
     assert "hub-eval" in sources[15]
+    assert "OLLAMA_MAX_LOADED_MODELS" in sources[4]
+    assert "OLLAMA_KEEP_ALIVE'] = '5m'" in sources[4]
+    assert "record resident Ollama models" in sources[16]
+    assert "'/usr/bin/time', '-v'" in sources[16]

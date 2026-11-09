@@ -26,4 +26,6 @@ def test_notebook_checks_long_running_commands_and_full_test_suite():
     assert "OLLAMA_MAX_LOADED_MODELS" in sources[4]
     assert "OLLAMA_KEEP_ALIVE'] = '5m'" in sources[4]
     assert "record resident Ollama models" in sources[16]
-    assert "'/usr/bin/time', '-v'" in sources[16]
+    assert "_run_checked_with_peak_rss" in sources[16]
+    assert "VmRSS:" in sources[16]
+    assert "CalledProcessError" in sources[16]

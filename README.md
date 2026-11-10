@@ -1,23 +1,18 @@
-# TRIAGE
+# HCAD-RAG
 **Gated Evidence Selection and Context Decoupling for Clinical RAG**
 
-A novel Retrieval-Augmented Generation framework that decomposes clinical semantics into orthogonal Entity–Relation–Modifier fields, applies graph-topology anisotropic transformations, and uses adaptive statistical Heaviside filtering combined with a calibrated JEV System One decision gate to mitigate context distraction and hallucinations in medical LLMs.
+A novel Retrieval-Augmented Generation framework that represents clinical semantics through Entity–Relation–Modifier (E/R/M) channels. Relation and modifier embeddings are partially decorrelated from the entity embedding using soft modified Gram–Schmidt orthogonalization (blend factor 0.70); the resulting channels are not guaranteed to be mutually orthogonal. It applies graph-topology anisotropic transformations, adaptive statistical Heaviside filtering, and a calibrated JEV System One decision gate to address context distraction and hallucination risk in medical LLMs.
 
 ---
-
 ## Key Innovations
-
-1. **Semantic Decoupling**: Represents each medical statement as a 3×d matrix $X_{\text{HCAD}} = [E; R; M]$ instead of a flat 1×d vector, decoupling entities, predicates, and modifiers.
+1. **Semantic Decoupling**: Represents each medical statement as a 3×d matrix $X_{\text{HCAD}} = [E; R; M]$ instead of a flat 1×d vector. Soft modified Gram–Schmidt orthogonalization (blend factor $\eta = 0.70$) partially decorrelates the relation and modifier embeddings from the entity embedding. The channels are not guaranteed to be mutually orthogonal; a query-independent anchor is used when a residual becomes degenerate.
 2. **Hybrid Decoupled Scoring**: Ranks candidates by $\Phi = w_d \cdot \cos(q, c) + (1 - w_d) \cdot \Phi_{\text{struct}}$, fusing the full-text dense match with the presence-masked Entity/Relation/Modifier channel score. The legacy topology-block weighting $W_A$ (node degree, edge confidence, IDF) remains available as an ablation (`HCAD_ANISO_DIM_WEIGHTING=1`); a query-adaptive channel-weight adapter can be trained on the dev pool (`train-tensor`, `HCAD_TENSOR_MODE=learned`).
 3. **Adaptive Heaviside Filtering**: Replaces rigid Top-K retrieval with a dual-gated dynamic threshold:
    $$\mathcal{M}_{\text{HCAD}}(t_i) = \Theta(\Phi_{\text{Final}}(t_i) - (\mu + k\sigma))$$
 4. **JEV System One Decision Gate**: Employs an intelligent decision gate (`typesafe-sdk`) to evaluate factual groundedness and prune irrelevant or ungrounded context before prompt assembly, preventing token bloat and hallucination injection.
 5. **Bidirectional Hypergraph Expansion**: Discovers high-order biomedical relations and therapy associations from PrimeKG using multi-hop neighborhood hyperedges.
-
 ---
-
 ## Architecture
-
 ```
 Clinical Query
       │
@@ -42,21 +37,19 @@ Semantic Decoupling (3×768 Matrix)    Candidate Context Pool
        JEV System One Decision Gate (Groundedness Verification)
                          │
                          ▼
-       Structured Clinical Prompt Construction
+        Structured Clinical Prompt Construction
                          │
                          ▼
-       Clinical LLM (Llama-3.1-8B-Instruct) ──► Verified Clinical Synthesis
+        Clinical LLM (Llama-3.1-8B-Instruct) ──► Verified Clinical Synthesis
 ```
-
 ---
-
 ## Quick Start
 
 ### 1. Prerequisites & Environment Setup
 
 ```bash
-git clone https://github.com/Nirajd071/HCAD-RAG.git
-cd HCAD-RAG
+git clone https://github.com/eklakhdewan/HCAD.git
+cd HCAD
 
 # Create and activate virtual environment
 python -m venv .venv
@@ -64,7 +57,6 @@ source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
-
 # Install SciSpacy biomedical NER models
 # (--no-deps: their metadata pins spacy<3.8 but they run fine under 3.8)
 pip install --no-deps https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_bc5cdr_md-0.5.4.tar.gz
@@ -73,7 +65,6 @@ pip install --no-deps https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/release
 
 Use the repository-root `.env` as the single local environment file — copy
 `.env.example` and keep one profile:
-
 - **Profile A (all LLMs local via ollama, zero LLM API keys):**
   `LLM_PROVIDER=ollama` + `JUDGE_OLLAMA_MODEL=qwen2.5:14b`. Generator
   (`llama3.1:8b`) and judge both run via ollama. Everything else keeps its
@@ -82,7 +73,6 @@ Use the repository-root `.env` as the single local environment file — copy
 - **Profile B (cloud-judge upgrade, opt-in):** `JUDGE_PROVIDER=huggingface`
   puts the judge on paper-parity `Qwen/Qwen2.5-72B-Instruct` via HF Inference
   Providers while the generator stays local.
-
 ```bash
 LLM_PROVIDER="huggingface"                              # "huggingface", "nvidia" (NIM), or "ollama"
 # JUDGE_PROVIDER="huggingface"                          # Optional hybrid: generator local (ollama),
@@ -91,21 +81,18 @@ WANDB_API_KEY="your_rotated_wandb_api_key"              # Optional, enables expe
 WANDB_PROJECT="hcad-rag"
 # WANDB_ENTITY="your_wandb_username_or_team"            # Optional
 ```
-
 The root `.env` is git-ignored and is loaded centrally by `src.config`; add
 settings there rather than creating another environment file. The W&B API key
 is loaded automatically for each evaluation, benchmark, hallucination
 evaluation, and weight-learning run. Do not put API keys in source code or
 commit them. Set `WANDB_MODE="disabled"` (or pass `--no-wandb`) to turn
 tracking off.
-
 ### 2. Prepare Knowledge Corpus & Indices
 
 ```bash
 # Build knowledge graph indices and vector database with clinical relations
 python src/main.py prepare --rebuild
 ```
-
 ### 3. Run Benchmark (Base Paper Protocol)
 
 Replicate the evaluation protocol from Hyper-RAG ([arXiv:2504.08758](https://arxiv.org/abs/2504.08758)):
@@ -114,7 +101,6 @@ Replicate the evaluation protocol from Hyper-RAG ([arXiv:2504.08758](https://arx
 # Run base paper benchmark comparing Baseline LLM, Vanilla RAG, and HCAD-RAG
 python src/evaluation/run_base_paper_benchmark.py 4
 ```
-
 Outputs:
 - **5-Dimension Scoring Assessment** (0–100 scale: Comprehensiveness, Diversity, Empowerment, Logical, Readability)
 - **8-Criteria Selection Assessment** (Pairwise Win-Rate with order counterbalancing)
@@ -123,18 +109,14 @@ Outputs:
 - **Significance Testing**: exact McNemar test on paired per-question correctness (overall score ≥ 70 of 100 counts as correct)
 - **Citation Precision**: fraction of `[Evidence i]` tags in generated answers that resolve to actually retrieved items
 - **MedHallu hallucination evaluation** via `src/evaluation/hallucination_evaluator.py`
-
 Per-question results are checkpointed to `results/base_paper_checkpoint.jsonl`
 and all aggregates are recomputed from the checkpoint, so interrupted runs
 resume without losing or double-counting samples. W&B logs the aggregate and
 per-question numeric metrics when `WANDB_API_KEY` is configured.
-
 Weight learning tunes only `filter_k`, the learned parameter currently consumed by
 the retriever. Anisotropic and component-scoring weights remain at their configured
 values; retrieval and model architecture are unchanged.
-
 ### Hybrid judging (small-GPU machines)
-
 `JUDGE_PROVIDER` decouples the judge from the generator. With
 `LLM_PROVIDER=ollama` (local `llama3.1:8b` via ollama) plus
 `JUDGE_PROVIDER=huggingface`, the judge runs on the paper-parity
@@ -142,9 +124,7 @@ values; retrieval and model architecture are unchanged.
 (pay-per-token, needs HF billing; roughly $2 for a 50-sample run) while all
 generation stays free and local. `JUDGE_PROVIDER=nvidia` does the same via
 NVIDIA NIM. Without the variable, the judge follows `LLM_PROVIDER`.
-
 ### Retrieval scoring knobs (ablations)
-
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `HCAD_DENSE_WEIGHT` | `0.5` | Weight of the dense full-text cosine in Φ; `0` = legacy structure-only score |
@@ -153,7 +133,6 @@ NVIDIA NIM. Without the variable, the judge follows `LLM_PROVIDER`.
 | `HCAD_RELATION_VOCAB` | `1` | PrimeKG relation labels / query relations mapped to canonical verb phrases |
 | `HCAD_EXPANSION_RULE` | `soft` | Member order inside relation hyperedges: `desc`, `soft`, `asc_cap` |
 | `HCAD_TAU_SAT` | unset | Gate-2 saturation ceiling, calibrated by `retrieval-eval` on the dev pool |
-
 `python src/main.py retrieval-eval --pool dev` reports paired Recall@5/NDCG@5
 for the legacy baseline, each added change, and the full configuration.
 
@@ -162,11 +141,48 @@ same answer-synthesis instructions (`synthesis_instructions` in
 `src/core/prompt_builder.py`); they differ only in the evidence supplied.
 
 ---
+## Results
 
+The paper reports a pilot evaluation on 50 clinical questions, using one
+evaluation session and a single LLM judge.
+
+| System | Overall rubric score (0–100) | End-to-end latency |
+|---------|------------------------------:|-------------------:|
+| Baseline LLM | 70.6 | Not reported |
+| Vanilla RAG | 74.7 | 2.09 s |
+| HCAD-RAG | 75.5 | 0.50 s |
+
+HCAD-RAG's overall rubric score was 0.8 points higher than Vanilla RAG
+(75.5 versus 74.7). The paper describes this difference as too small to
+establish a meaningful advantage. The reported end-to-end latency was
+0.50 s for HCAD-RAG and 2.09 s for Vanilla RAG.
+
+These figures are preliminary pilot results, not verified benchmark claims.
+See the Limitations section below and the paper for the evaluation details.
+
+---
+## Limitations
+
+- **Preliminary evaluation:** The reported results come from one pilot run of
+  50 clinical questions and one LLM judge. Inter-judge agreement, human scoring,
+  confidence intervals, and paired significance testing were not established.
+- **Evaluation protocol:** Questions were generated from passages in the
+  retrieval corpus and evaluated against those same sources. This may favor
+  retrieval-based systems over the no-retrieval baseline.
+- **No measured hallucination result:** The paper reports that the hallucination
+  evaluation modes did not produce saved output files. Therefore, the paper
+  does not establish that HCAD-RAG reduces medical hallucinations.
+- **Biomedical scope:** The models, knowledge graph, relation vocabulary,
+  encoder, and evaluation questions are biomedical. Performance in other
+  domains has not been established.
+- **No clinical validation:** HCAD-RAG has not been validated in a clinical
+  setting and must not be used for diagnosis, treatment decisions, or other
+  clinical purposes.
+
+---
 ## Project Structure
-
 ```
-hcad-rag/
+HCAD/
 ├── requirements.txt                   # Project dependencies
 ├── README.md                          # Documentation
 ├── .gitignore                         # Git exclusion rules
@@ -209,9 +225,7 @@ hcad-rag/
     ├── figures/                       # Benchmark charts
     └── tables/                        # Summary metrics & logs
 ```
-
 ---
-
 ## Datasets
 
 | Dataset | Source | Purpose |
@@ -221,7 +235,6 @@ hcad-rag/
 | PMC Open Access | NCBI / PMC | Curated open-access clinical text corpus |
 
 ---
-
 ## References
 
 - **Hyper-RAG**: *Combating LLM Hallucinations using Hypergraph-Driven Retrieval-Augmented Generation* ([arXiv:2504.08758](https://arxiv.org/abs/2504.08758))
@@ -230,7 +243,6 @@ hcad-rag/
 - **SapBERT**: Liu et al., *Self-Alignment Pretraining for Biomedical Entity Representations*, NAACL (2021)
 
 ---
-
 ## License
 
 Research and academic use only. Individual components are governed by their respective dataset and model licenses.

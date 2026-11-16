@@ -30,12 +30,23 @@ class UnifiedLLMClient:
         provider: Optional[str] = None,
         temperature: float = 0.1,
         max_tokens: int = 512,
+        strict: bool = False,
     ):
+        """
+        Args:
+            strict: when True the client NEVER substitutes another provider
+                or model (no HF/NIM -> Ollama fallback). Judges of the
+                multi-judge ensemble are strict, so a missing API key or a
+                failed call surfaces as an error instead of silently scoring
+                with a different model under the wrong judge name.
+        """
         from src.config import (
             LLM_PROVIDER, LLM_HF_MODEL, JUDGE_HF_MODEL, JUDGE_OLLAMA_MODEL,
             LLM_MODEL, HF_TOKEN,
         )
 
+        self.strict = strict
+        self.last_usage: dict = {}
         self.provider = (provider or os.getenv("LLM_PROVIDER") or LLM_PROVIDER).lower()
         # Judge-specific provider override: run the generator fully local
         # (e.g., ollama on a small GPU) while the judge uses a stronger
@@ -67,6 +78,10 @@ class UnifiedLLMClient:
             else:
                 self.model = model
             if not self.nvidia_key:
+                if strict:
+                    raise RuntimeError(
+                        f"NVIDIA_API_KEY is not set but strict client requested "
+                        f"nvidia:{self.model}")
                 logger.warning("NVIDIA_API_KEY not found; falling back to Ollama.")
                 self.provider = "ollama"
                 self.model = self.ollama_model
@@ -80,8 +95,12 @@ class UnifiedLLMClient:
                 self._hf_client = InferenceClient(api_key=self.token, timeout=90.0)
                 return
             except Exception as e:
+                if strict:
+                    raise RuntimeError(f"HF client unavailable for strict client: {e}") from e
                 logger.warning("Failed to initialize HF client: %s. Using Ollama.", e)
         else:
+            if strict and self.provider == "huggingface":
+                raise RuntimeError("HF_TOKEN is not set but strict client requested huggingface")
             if self.provider != "nvidia":
                 logger.info("HF provider unavailable (no token) - using Ollama.")
         self.provider = "ollama"
@@ -99,6 +118,8 @@ class UnifiedLLMClient:
         except TypeError:
             kwargs.pop("think", None)
             res = ollama.chat(model=model, messages=messages, **kwargs)
+        raw = res if isinstance(res, dict) else getattr(res, "__dict__", {})
+        self.last_usage = _ollama_usage(raw)
         return res.message.content or ""
 
     def _chat_ollama_http(self, messages, temp, tokens, json_mode, model):
@@ -114,7 +135,9 @@ class UnifiedLLMClient:
                 "http://localhost:11434/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_S,
             )
             resp.raise_for_status()
-            return resp.json().get("message", {}).get("content", "") or ""
+            data = resp.json()
+            self.last_usage = _ollama_usage(data)
+            return data.get("message", {}).get("content", "") or ""
         except Exception as e:
             logger.warning("Ollama HTTP call failed (%s); retrying via SDK.", e)
             return self._chat_ollama(messages, temp, tokens, json_mode, model)
@@ -133,6 +156,7 @@ class UnifiedLLMClient:
         """
         temp = temperature if temperature is not None else self.temperature
         tokens = max_tokens if max_tokens is not None else self.max_tokens
+        self.last_usage = {}
 
         ollama_target = self.model if self.provider == "ollama" else self.ollama_model
 
@@ -153,17 +177,40 @@ class UnifiedLLMClient:
                 resp = requests.post(self.nvidia_url, json=payload, headers=headers, timeout=60.0)
                 resp.raise_for_status()
                 data = resp.json()
+                usage = data.get("usage") or {}
+                self.last_usage = {
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                }
                 return data["choices"][0]["message"]["content"] or ""
             except Exception as e:
+                if self.strict:
+                    raise RuntimeError(
+                        f"NVIDIA NIM call failed for strict client {self.model}: {e}") from e
                 logger.warning("NVIDIA NIM call failed (%s); falling back to Ollama.", e)
 
         if self.provider == "huggingface":
             for attempt in range(2):
                 try:
-                    res = self._hf_client.chat.completions.create(
-                        model=self.model, messages=messages,
-                        max_tokens=tokens, temperature=temp,
-                    )
+                    hf_kwargs = {}
+                    if json_mode:
+                        hf_kwargs["response_format"] = {"type": "json_object"}
+                    try:
+                        res = self._hf_client.chat.completions.create(
+                            model=self.model, messages=messages,
+                            max_tokens=tokens, temperature=temp, **hf_kwargs,
+                        )
+                    except TypeError:
+                        res = self._hf_client.chat.completions.create(
+                            model=self.model, messages=messages,
+                            max_tokens=tokens, temperature=temp,
+                        )
+                    usage = getattr(res, "usage", None)
+                    if usage is not None:
+                        self.last_usage = {
+                            "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                            "completion_tokens": getattr(usage, "completion_tokens", None),
+                        }
                     return res.choices[0].message.content or ""
                 except Exception as e:
                     err = str(e)
@@ -172,6 +219,64 @@ class UnifiedLLMClient:
                         break
                     if attempt == 0:
                         time.sleep(1.0)
+            if self.strict:
+                raise RuntimeError(f"HF call failed for strict client {self.model}")
             logger.warning("Falling back to Ollama (%s) for this call only.", ollama_target)
 
         return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+
+    def chat_with_stats(
+        self,
+        messages: list[dict],
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        json_mode: bool = False,
+    ) -> tuple[str, dict]:
+        """chat() plus generation-cost accounting for the latency breakdown.
+
+        Returns (text, stats): wall-clock ``t_generation`` (prefill + decode,
+        network included), prompt / generated token counts reported by the
+        provider, and decode tokens-per-second. Ollama additionally reports
+        server-side ``prefill_s`` / ``decode_s``. Token counts are None when
+        a provider does not report usage.
+        """
+        t0 = time.perf_counter()
+        text = self.chat(messages, temperature=temperature,
+                         max_tokens=max_tokens, json_mode=json_mode)
+        wall = time.perf_counter() - t0
+        usage = dict(self.last_usage or {})
+        completion = usage.get("completion_tokens")
+        decode_s = usage.get("decode_s")
+        if completion and decode_s:
+            tps = completion / decode_s
+        elif completion and wall > 0:
+            tps = completion / wall
+        else:
+            tps = None
+        stats = {
+            "t_generation": wall,
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": completion,
+            "prefill_s": usage.get("prefill_s"),
+            "decode_s": decode_s,
+            "tokens_per_second": tps,
+            "provider": self.provider,
+            "model": self.model,
+        }
+        return text, stats
+
+
+def _ollama_usage(data: dict) -> dict:
+    """Token/timing counters from an Ollama /api/chat response (ns -> s)."""
+    data = data or {}
+
+    def _sec(key):
+        val = data.get(key)
+        return val / 1e9 if isinstance(val, (int, float)) else None
+
+    return {
+        "prompt_tokens": data.get("prompt_eval_count"),
+        "completion_tokens": data.get("eval_count"),
+        "prefill_s": _sec("prompt_eval_duration"),
+        "decode_s": _sec("eval_duration"),
+    }

@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -23,6 +24,7 @@ from src.config import (
     SCORE_WEIGHT_MODIFIER,
     SCORE_WEIGHT_RELATION,
     aniso_dim_weighting_enabled,
+    decision_gate_enabled,
     dense_weight,
     map_query_relation,
     map_relation_text,
@@ -111,6 +113,11 @@ class HCADRetriever:
         self._last_tensor_inputs: Optional[tuple] = None
         self._last_channel_sims: Optional["np.ndarray"] = None
         self._last_candidate_pool: Optional[list] = None
+        # Wall-clock seconds per methodology stage for the LAST retrieve()
+        # call (see src/core/pipeline_stages.py). Used by the latency
+        # breakdown so retrieval cost is reported per stage, separately
+        # from generation.
+        self._last_stage_timings: dict[str, float] = {}
 
     def _handle_vector_error(self, exc: Exception) -> None:
         logger.warning("Vector store retrieval failed: %s", exc)
@@ -568,6 +575,9 @@ class HCADRetriever:
         self._last_phi_scores = None
         self._last_dense_sims = None
         self._last_dense_weight = 0.0
+        timings: dict[str, float] = {}
+        self._last_stage_timings = timings
+        _t = time.perf_counter()
 
         entities = self._ner.extract_entities(query)
         relations = self._relation_extractor.extract_rules(query, entities)
@@ -633,11 +643,15 @@ class HCADRetriever:
                 weights = np.full(dim, 1.0 / dim, dtype=np.float32)
             component_a = None
 
+        timings["query_understanding"] = time.perf_counter() - _t
+        _t = time.perf_counter()
         candidates = self._get_candidate_contexts(
             query, entities, n_vector=n_candidates, relations=relations
         )
+        timings["candidate_pool"] = time.perf_counter() - _t
         if not candidates:
             return []
+        _t = time.perf_counter()
 
         # Vectorized batch decoupling of all candidates in a single tensor operation
         candidate_docs = []
@@ -678,6 +692,8 @@ class HCADRetriever:
             as_numpy=True,
             return_presence=True,
         )
+        timings["semantic_decoupling"] = time.perf_counter() - _t
+        _t = time.perf_counter()
         if component_a is not None:
             channel_weights = (float(component_a[0]), float(component_a[1]),
                                float(component_a[2]))
@@ -742,6 +758,7 @@ class HCADRetriever:
             k=k,
             max_top_k=MAX_EVIDENCE_ITEMS,
         )
+        timings["scoring_and_filter"] = time.perf_counter() - _t
 
         # the previous "Fix #2" re-admitted candidates
         # BELOW the absolute floor Phi_min = 0.10 whenever both gates rejected
@@ -756,11 +773,20 @@ class HCADRetriever:
             )
             return []
 
-        # JEV-inspired Decision Gate: Verify relevance & prune token bloat
-        if self._decision_gate is not None:
+        # JEV-inspired Decision Gate: Verify relevance & prune token bloat.
+        # HCAD_DECISION_GATE=0 is the "w/o Decision Gate" ablation: the
+        # Heaviside-filtered list is passed through unchanged.
+        _t = time.perf_counter()
+        if self._decision_gate is not None and decision_gate_enabled():
             filtered = self._decision_gate.verify_and_prune_candidates(filtered, query)
+        timings["decision_gate"] = time.perf_counter() - _t
 
         return filtered
+
+    def build_messages(self, query: str, contexts: list[dict]) -> list[dict]:
+        """Generation prompt for already-retrieved evidence (stage 5)."""
+        self._ensure_components()
+        return self._prompt_builder.build_rag_prompt(query, contexts)
 
     def retrieve_and_generate(
         self,

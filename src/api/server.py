@@ -27,7 +27,14 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from src.config import EVIDENCE_WORD_BUDGET, FILTERING_K, RESULTS_DIR
+from src.config import (
+    ARM_LABELS,
+    BASELINE_LABEL,
+    EVIDENCE_WORD_BUDGET,
+    FILTERING_K,
+    RESULTS_DIR,
+    canonical_system_label,
+)
 from src.core.prompt_builder import context_document
 
 logger = logging.getLogger(__name__)
@@ -428,40 +435,48 @@ def subgraph(query: str = Query(..., min_length=3)) -> Dict[str, Any]:
     }
 
 def _benchmark_from_results(results: Dict[str, Any]) -> Dict[str, Any]:
-    scores = results.get("scoring_based_assessment", {}) or {}
+    """Workbench view of a results file (current or legacy schema)."""
+    hcad, dense, base = ARM_LABELS["hcad"], ARM_LABELS["dense"], BASELINE_LABEL
+    scores = {canonical_system_label(k): v for k, v in
+              (results.get("scoring_based_assessment", {}) or {}).items()}
+    citations = {canonical_system_label(k): v for k, v in
+                 (results.get("citation_precision") or {}).items()}
+
     def dim(system: str) -> float:
         return round(float(scores.get(system, {}).get("overall_score", 0.0) or 0.0), 1)
 
-    citation = (results.get("citation_precision") or {}).get("HCAD-RAG", {}) or {}
-    citation_precision = citation.get("mean_precision")
+    citation_precision = (citations.get(hcad) or {}).get("mean_precision")
 
     radar = [
-        {"dimension": "Diagnostic Accuracy", "triage": dim("HCAD-RAG"),
-         "vanilla": dim("Vanilla RAG"), "baseline": dim("Baseline LLM")},
+        {"dimension": "Diagnostic Accuracy", "triage": dim(hcad),
+         "vanilla": dim(dense), "baseline": dim(base)},
         {"dimension": "Evidence Faithfulness",
          "triage": round((citation_precision or 0.0) * 100, 1),
-         "vanilla": round(((results.get("citation_precision") or {})
-                           .get("Vanilla RAG", {}) or {}).get("mean_precision") or 0.0, 1) * 100,
+         "vanilla": round(((citations.get(dense) or {}).get("mean_precision") or 0.0) * 100, 1),
          "baseline": 0.0},
         {"dimension": "Contradiction Avoidance",
-         "triage": _score_dim(scores, "HCAD-RAG", "logical"),
-         "vanilla": _score_dim(scores, "Vanilla RAG", "logical"),
-         "baseline": _score_dim(scores, "Baseline LLM", "logical")},
+         "triage": _score_dim(scores, hcad, "logical"),
+         "vanilla": _score_dim(scores, dense, "logical"),
+         "baseline": _score_dim(scores, base, "logical")},
         {"dimension": "Hallucination Suppression", "triage": 0.0, "vanilla": 0.0, "baseline": 0.0},
         {"dimension": "Completeness",
-         "triage": _score_dim(scores, "HCAD-RAG", "comprehensiveness"),
-         "vanilla": _score_dim(scores, "Vanilla RAG", "comprehensiveness"),
-         "baseline": _score_dim(scores, "Baseline LLM", "comprehensiveness")},
+         "triage": _score_dim(scores, hcad, "comprehensiveness"),
+         "vanilla": _score_dim(scores, dense, "comprehensiveness"),
+         "baseline": _score_dim(scores, base, "comprehensiveness")},
     ]
 
-    selection = ((results.get("selection_based_assessment") or {})
-                 .get("HCAD_vs_Vanilla", {}) or {})
+    sel_all = results.get("selection_based_assessment") or {}
+    selection = sel_all.get("hcad_vs_dense") or sel_all.get("HCAD_vs_Vanilla") or {}
     win_rate = {
         criterion: round(rate, 1)
         for criterion, rate in (selection.get("criteria_win_rates_pct") or {}).items()
     }
 
-    mcnemar_in = (results.get("significance_testing") or {}).get("HCAD_vs_Vanilla") or {}
+    tests = ((results.get("statistical_tests") or {}).get("comparisons") or {})
+    mcnemar_in = (((tests.get("hcad_vs_dense") or {}).get("consensus") or {})
+                  .get("mcnemar_exact")
+                  or (results.get("significance_testing") or {}).get("HCAD_vs_Vanilla")
+                  or {})
 
     return {
         "radar": radar,

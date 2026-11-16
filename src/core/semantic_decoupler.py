@@ -17,7 +17,7 @@ from src.config import (
     NEUTRAL_MODIFIER_TEXT,
     NEUTRAL_RELATION_TEXT,
     NUM_SEMANTIC_COMPONENTS,
-    ORTHO_STRENGTH,
+    ortho_strength,
 )
 
 logger = logging.getLogger(__name__)
@@ -548,7 +548,9 @@ class SemanticDecoupler:
             M = all_vecs[2*n:]
 
             eps = GS_EPS
-            eta = ORTHO_STRENGTH
+            # Runtime-overridable so the "w/o Soft Gram-Schmidt" ablation
+            # (HCAD_ORTHO_STRENGTH=0) runs the identical code path.
+            eta = ortho_strength()
 
             # Batched soft Gram-Schmidt with presence handling 
             E_orth = E / (torch.linalg.norm(E, dim=1, keepdim=True) + eps)

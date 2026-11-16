@@ -48,7 +48,7 @@ Semantic Decoupling (3×768 Matrix)    Candidate Context Pool
 ### 1. Prerequisites & Environment Setup
 
 ```bash
-git clone https://github.com/eklakhdewan/HCAD.git
+git clone https://github.com/ajheshbasnet/HCAD.git
 cd HCAD
 
 # Create and activate virtual environment
@@ -98,15 +98,33 @@ python src/main.py prepare --rebuild
 Replicate the evaluation protocol from Hyper-RAG ([arXiv:2504.08758](https://arxiv.org/abs/2504.08758)):
 
 ```bash
-# Run base paper benchmark comparing Baseline LLM, Vanilla RAG, and HCAD-RAG
-python src/evaluation/run_base_paper_benchmark.py 4
+# Multi-judge benchmark: closed-book Llama-3.1-8B, BM25, dense, hybrid, HCAD-RAG
+python src/main.py base-paper --samples 50 --plot
+# + component ablations (w/o Decoupling, w/o Soft Gram-Schmidt, w/o Decision Gate)
+python src/main.py base-paper --samples 50 --ablations
+# Indication vs contraindication paired-polarity retrieval benchmark (35 drug pairs)
+python src/main.py polarity                 # controlled curated corpus, all arms
+python src/main.py polarity --mode store    # full retrieval over the built KG / vector store
+# MedHallu: classifier-only (detector) and HCAD-RAG generated answers
+python src/main.py medhallu --system detector --n 200
+python src/main.py medhallu --system hcad --n 200
+# Every table + figure (incl. 5-stage methodology diagram) from the saved JSON,
+# with a table-vs-JSON consistency check
+python src/main.py figures
 ```
+Arms (one label each, used verbatim in JSON, tables and figures):
+**Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)**, BM25 RAG (top-5),
+Dense RAG (S-PubMedBERT, top-5), Hybrid BM25+Dense RAG (RRF, top-5), HCAD-RAG.
+Judges: `JUDGE_ENSEMBLE` (default `ollama:gemma2:9b,ollama:qwen2.5:14b`;
+`JUDGE_ENABLE_API_JUDGE=1` adds `meta/llama-3.3-70b-instruct` via NVIDIA NIM),
+every call in JSON mode, no neutral fallback scores on judge failure.
 Outputs:
 - **5-Dimension Scoring Assessment** (0–100 scale: Comprehensiveness, Diversity, Empowerment, Logical, Readability)
 - **8-Criteria Selection Assessment** (Pairwise Win-Rate with order counterbalancing)
-- **Retrieval Latency Profiling**
+- **Statistics** (`src/evaluation/stats.py`): bootstrap 95% CIs per rubric dimension, paired bootstrap CI of score differences, two-sided Wilcoxon signed-rank, paired t-test, exact McNemar - for the judge consensus and for each judge
+- **Inter-judge agreement**: Cohen's kappa per judge pair and Fleiss' kappa (pairwise winners, correctness, rubric band)
+- **Latency breakdown** (`results/latency_breakdown.json`): retrieval-only latency (1 cold + N warm runs, mean ± std, per pipeline stage for HCAD-RAG) separated from generation latency (prefill/decode seconds, prompt/generated tokens, tokens/s)
 - **Retrieval Quality** (`src/evaluation/metrics.py`): NDCG@5 / Recall@5 over the paper-protocol gold relevance labels — the source chunk that generated each question
-- **Significance Testing**: exact McNemar test on paired per-question correctness (overall score ≥ 70 of 100 counts as correct)
 - **Citation Precision**: fraction of `[Evidence i]` tags in generated answers that resolve to actually retrieved items
 - **MedHallu hallucination evaluation** via `src/evaluation/hallucination_evaluator.py`
 Per-question results are checkpointed to `results/base_paper_checkpoint.jsonl`
@@ -136,7 +154,7 @@ NVIDIA NIM. Without the variable, the judge follows `LLM_PROVIDER`.
 `python src/main.py retrieval-eval --pool dev` reports paired Recall@5/NDCG@5
 for the legacy baseline, each added change, and the full configuration.
 
-All three benchmark arms (Baseline LLM, Vanilla RAG, HCAD-RAG) receive the
+All benchmark arms receive the
 same answer-synthesis instructions (`synthesis_instructions` in
 `src/core/prompt_builder.py`); they differ only in the evidence supplied.
 
@@ -148,14 +166,15 @@ evaluation session and a single LLM judge.
 
 | System | Overall rubric score (0–100) | End-to-end latency |
 |---------|------------------------------:|-------------------:|
-| Baseline LLM | 70.6 | Not reported |
-| Vanilla RAG | 74.7 | 2.09 s |
+| Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book) | 70.6 | Not reported |
+| Dense RAG (S-PubMedBERT, top-5) | 74.7 | 2.09 s |
 | HCAD-RAG | 75.5 | 0.50 s |
 
-HCAD-RAG's overall rubric score was 0.8 points higher than Vanilla RAG
+HCAD-RAG's overall rubric score was 0.8 points higher than dense RAG
 (75.5 versus 74.7). The paper describes this difference as too small to
 establish a meaningful advantage. The reported end-to-end latency was
-0.50 s for HCAD-RAG and 2.09 s for Vanilla RAG.
+0.50 s for HCAD-RAG and 2.09 s for dense RAG. These pilot latencies mix
+retrieval with generation; the revised harness reports them separately.
 
 These figures are preliminary pilot results, not verified benchmark claims.
 See the Limitations section below and the paper for the evaluation details.

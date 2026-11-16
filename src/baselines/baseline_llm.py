@@ -94,7 +94,9 @@ def _extract_answer_letter(response: str) -> str:
 extract_answer_letter = _extract_answer_letter
 
 class BaselineLLM:
-    """Standalone LLM baseline with no retrieval augmentation.
+    """Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book) baseline.
+
+    Reported in every table/figure under ``config.BASELINE_LABEL``.
 
     This baseline directly queries an Ollama-hosted LLM to establish a
     performance floor for medical QA. It demonstrates what a foundation
@@ -176,17 +178,23 @@ class BaselineLLM:
         data = resp.json()
         return (data.get("response") or "").strip()
 
-    def generate(self, query: str) -> str:
-        """Generate a free-text answer to a medical query (no retrieval)."""
-        from src.core.llm_client import UnifiedLLMClient
+    @staticmethod
+    def build_messages(query: str, contexts: Optional[list] = None) -> list[dict]:
+        """Closed-book prompt (``contexts`` is ignored by construction)."""
         from src.core.prompt_builder import synthesis_instructions
 
-        # Same synthesis instructions as both RAG arms (no-evidence variant).
+        # Same synthesis instructions as the RAG arms (no-evidence variant).
         user_content = f"Clinical Query:\n{query}\n\n{synthesis_instructions(None)}"
-        messages = [
+        return [
             {"role": "system", "content": BASELINE_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
+
+    def generate(self, query: str) -> str:
+        """Generate a free-text answer to a medical query (no retrieval)."""
+        from src.core.llm_client import UnifiedLLMClient
+
+        messages = self.build_messages(query)
         try:
             client = UnifiedLLMClient(model=self.model, temperature=self.temperature, max_tokens=self.max_tokens)
             return client.chat(messages)

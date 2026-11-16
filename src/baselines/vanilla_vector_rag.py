@@ -22,6 +22,54 @@ from src.baselines.baseline_llm import BaselineLLM, _extract_answer_letter
 
 logger = logging.getLogger(__name__)
 
+def build_rag_prompt(query: str, contexts: list[dict]) -> str:
+    """Prompt shared by every flat-retrieval RAG arm (dense, BM25, hybrid).
+
+    Fairness: all arms operate under the same evidence word budget
+    (EVIDENCE_WORD_BUDGET), so answer-length differences reflect evidence
+    SELECTION rather than evidence BUDGET. Clipping follows the same
+    sentence-boundary rule as the benchmark's judge-side formatter
+    (mid-sentence clipping can sever negations).
+    """
+    if not contexts:
+        return query
+
+    context_parts = []
+    remaining_words = EVIDENCE_WORD_BUDGET
+    for i, ctx in enumerate(contexts, 1):
+        if remaining_words <= 0:
+            break
+        words = str(ctx.get("text", "")).split()
+        if not words:
+            continue
+        budget_text = " ".join(words[:remaining_words])
+        cut = max(budget_text.rfind(". "), budget_text.rfind("! "),
+                  budget_text.rfind("? "))
+        selected = budget_text if cut == -1 else budget_text[: cut + 1]
+        context_parts.append(
+            f"[Context {i}] (similarity={float(ctx.get('score', 0.0)):.4f})\n{selected.strip()}"
+        )
+        remaining_words -= len(selected.split())
+    context_block = "\n\n---\n\n".join(context_parts)
+
+    from src.core.prompt_builder import synthesis_instructions
+
+    # Identical synthesis instructions to HCAD-RAG and the closed-book
+    # baseline; the arms differ only in the evidence supplied.
+    return (
+        f"Clinical Query:\n{query}\n\n"
+        f"Retrieved Contexts:\n{context_block}\n\n"
+        f"{synthesis_instructions('Context')}"
+    )
+
+
+def build_rag_messages(query: str, contexts: list[dict]) -> list[dict]:
+    return [
+        {"role": "system", "content": LLM_SYSTEM_PROMPT},
+        {"role": "user", "content": build_rag_prompt(query, contexts)},
+    ]
+
+
 class VanillaVectorRAG:
     """Conventional Vector-RAG baseline using flat Top-K cosine retrieval.
 
@@ -191,54 +239,11 @@ class VanillaVectorRAG:
         query: str,
         contexts: list[dict],
     ) -> str:
-        """Build the RAG prompt by concatenating retrieved contexts.
+        """Build the RAG prompt (see module-level ``build_rag_prompt``)."""
+        return build_rag_prompt(query, contexts)
 
-        Args:
-            query: Original user query.
-            contexts: List of retrieved passage dicts.
-
-        Returns:
-            Formatted prompt string with contexts + query.
-        """
-        if not contexts:
-            return query
-
-        # Fairness: both systems operate under the same evidence word budget
-        # (EVIDENCE_WORD_BUDGET). Without this, vanilla's generator receives
-        # the full text of its top-K passages (thousands of words for PMC
-        # chunks) while HCAD's decision gate enforces a structured token
-        # economy, so answer-length differences would reflect the evidence
-        # BUDGET rather than evidence SELECTION - the actual hypothesis.
-        # Clipping follows the same sentence-boundary rule as the benchmark's
-        # judge-side formatter (mid-sentence clipping can sever negations).
-        context_parts = []
-        remaining_words = EVIDENCE_WORD_BUDGET
-        for i, ctx in enumerate(contexts, 1):
-            if remaining_words <= 0:
-                break
-            words = str(ctx.get("text", "")).split()
-            if not words:
-                continue
-            budget_text = " ".join(words[:remaining_words])
-            cut = max(budget_text.rfind(". "), budget_text.rfind("! "),
-                      budget_text.rfind("? "))
-            selected = budget_text if cut == -1 else budget_text[: cut + 1]
-            context_parts.append(
-                f"[Context {i}] (similarity={ctx['score']:.4f})\n{selected.strip()}"
-            )
-            remaining_words -= len(selected.split())
-        context_block = "\n\n---\n\n".join(context_parts)
-
-        from src.core.prompt_builder import synthesis_instructions
-
-        # Identical synthesis instructions to HCAD-RAG and the baseline; the
-        # arms differ only in the evidence supplied.
-        prompt = (
-            f"Clinical Query:\n{query}\n\n"
-            f"Retrieved Contexts:\n{context_block}\n\n"
-            f"{synthesis_instructions('Context')}"
-        )
-        return prompt
+    def build_messages(self, query: str, contexts: list[dict]) -> list[dict]:
+        return build_rag_messages(query, contexts)
 
     def retrieve_and_generate(
         self,
@@ -259,10 +264,7 @@ class VanillaVectorRAG:
         prompt = self._build_rag_prompt(query, contexts)
 
         from src.core.llm_client import UnifiedLLMClient
-        messages = [
-            {"role": "system", "content": LLM_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ]
+        messages = build_rag_messages(query, contexts)
         try:
             client = UnifiedLLMClient(
                 model=self.llm.model,

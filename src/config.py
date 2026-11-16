@@ -396,3 +396,129 @@ NEGATION_CUES = [
 DEFAULT_EVAL_SAMPLES = 200
 RANDOM_SEED = 42
 
+# ---------------------------------------------------------------------------
+# Benchmark arms (reviewer request: explicit baseline naming + standard
+# retrieval baselines + component ablations).
+#
+# Every arm has a stable machine id (used in checkpoint keys and CLI flags)
+# and ONE display label used verbatim in result JSON, tables and figures,
+# so a table and the figure drawn from it can never disagree on a name.
+# ---------------------------------------------------------------------------
+
+# The generic "Baseline LLM" term is retired: the closed-book arm is the
+# generator itself with retrieval removed.
+BASELINE_LABEL = "Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)"
+BASELINE_SHORT_LABEL = "Llama-3.1-8B (Closed-Book)"
+
+ARM_LABELS = {
+    "closed_book": BASELINE_LABEL,
+    "bm25": "BM25 RAG (top-5)",
+    "dense": "Dense RAG (S-PubMedBERT, top-5)",
+    "hybrid": "Hybrid BM25+Dense RAG (RRF, top-5)",
+    "hcad": "HCAD-RAG",
+    "hcad_no_decoupling": "HCAD-RAG w/o Decoupling",
+    "hcad_no_gs": "HCAD-RAG w/o Soft Gram-Schmidt",
+    "hcad_no_gate": "HCAD-RAG w/o Decision Gate",
+}
+ARM_SHORT_LABELS = {
+    "closed_book": BASELINE_SHORT_LABEL,
+    "bm25": "BM25",
+    "dense": "Dense",
+    "hybrid": "Hybrid",
+    "hcad": "HCAD-RAG",
+    "hcad_no_decoupling": "w/o Decoupling",
+    "hcad_no_gs": "w/o Soft GS",
+    "hcad_no_gate": "w/o Gate",
+}
+STANDARD_ARMS = ["closed_book", "bm25", "dense", "hybrid", "hcad"]
+ABLATION_ARMS = ["hcad_no_decoupling", "hcad_no_gs", "hcad_no_gate"]
+
+# Labels used by checkpoints / result files written before the renaming.
+# Readers map them onto the current labels; writers never emit them.
+LEGACY_SYSTEM_LABELS = {
+    "Baseline LLM": BASELINE_LABEL,
+    "Vanilla RAG": ARM_LABELS["dense"],
+}
+
+
+def canonical_system_label(label: str) -> str:
+    """Map a legacy system label onto its current display label."""
+    return LEGACY_SYSTEM_LABELS.get(label, label)
+
+
+# Component ablations are expressed as environment overrides of the
+# runtime toggles below, so an ablation arm runs the *same* code path as
+# the full system with exactly one component switched off.
+ABLATION_ENV = {
+    # Phi = dense cosine only: the E/R/M structured channel score is removed.
+    "hcad_no_decoupling": {"HCAD_DENSE_WEIGHT": "1.0"},
+    # eta = 0: relation/modifier embeddings are used raw (no soft Gram-Schmidt).
+    "hcad_no_gs": {"HCAD_ORTHO_STRENGTH": "0.0"},
+    # The JEV decision gate is bypassed after the Heaviside filter.
+    "hcad_no_gate": {"HCAD_DECISION_GATE": "0"},
+}
+
+
+def ortho_strength() -> float:
+    """Active soft Gram-Schmidt blend eta in [0, 1] (env HCAD_ORTHO_STRENGTH)."""
+    raw = os.environ.get("HCAD_ORTHO_STRENGTH")
+    if raw is None or raw == "":
+        return ORTHO_STRENGTH
+    try:
+        return min(1.0, max(0.0, float(raw)))
+    except ValueError:
+        return ORTHO_STRENGTH
+
+
+def decision_gate_enabled() -> bool:
+    """Runtime toggle for the JEV decision gate (env HCAD_DECISION_GATE)."""
+    return os.environ.get("HCAD_DECISION_GATE", "1") != "0"
+
+
+# ---------------------------------------------------------------------------
+# Multi-judge evaluation (advisor directive). JUDGE_ENSEMBLE is a comma
+# separated list of "provider:model" specs; the first entry is the primary
+# judge. The 70B judge is an optional API judge (NVIDIA NIM by default).
+# ---------------------------------------------------------------------------
+DEFAULT_JUDGE_ENSEMBLE = "ollama:gemma2:9b,ollama:qwen2.5:14b"
+OPTIONAL_API_JUDGE = "nvidia:meta/llama-3.3-70b-instruct"
+
+
+def judge_ensemble_specs() -> list[tuple[str, str]]:
+    """Parsed judge ensemble: [(provider, model), ...] (primary first).
+
+    JUDGE_ENSEMBLE overrides the default local pair; JUDGE_ENABLE_API_JUDGE=1
+    appends the optional Llama-3.3-70B API judge.
+    """
+    raw = os.environ.get("JUDGE_ENSEMBLE", "").strip() or DEFAULT_JUDGE_ENSEMBLE
+    specs: list[tuple[str, str]] = []
+    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    if os.environ.get("JUDGE_ENABLE_API_JUDGE", "0") == "1":
+        entries.append(OPTIONAL_API_JUDGE)
+    for entry in entries:
+        provider, sep, model = entry.partition(":")
+        if not sep or not model:
+            raise ValueError(
+                f"Invalid JUDGE_ENSEMBLE entry {entry!r}: expected 'provider:model'"
+            )
+        provider = provider.strip().lower()
+        if provider not in ("ollama", "nvidia", "huggingface"):
+            raise ValueError(f"Unknown judge provider {provider!r} in {entry!r}")
+        spec = (provider, model.strip())
+        if spec not in specs:
+            specs.append(spec)
+    return specs
+
+
+JUDGE_TEMPERATURE = 0.0
+JUDGE_MAX_TOKENS = 1024
+
+# ---------------------------------------------------------------------------
+# Statistics, latency and polarity benchmark parameters.
+# ---------------------------------------------------------------------------
+BOOTSTRAP_RESAMPLES = int(os.getenv("BOOTSTRAP_RESAMPLES", "10000"))
+CONFIDENCE_LEVEL = 0.95
+LATENCY_TIMED_RUNS = int(os.getenv("LATENCY_TIMED_RUNS", "3"))
+POLARITY_TOP_K = int(os.getenv("POLARITY_TOP_K", "5"))
+HYBRID_RRF_K = 60  # reciprocal-rank-fusion constant (Cormack et al., 2009)
+

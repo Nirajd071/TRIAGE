@@ -39,6 +39,8 @@ Thumbs.db
 
 # Large Deliverables Archive
 deliverables/*.zip
+TRIAGE/
+results/cache/
 
 # Secrets & Environment
 .env

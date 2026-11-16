@@ -27,6 +27,7 @@ os.environ["MPLBACKEND"] = "Agg"
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 from src.config import FIGURES_DIR
 
@@ -265,8 +266,129 @@ def plot_hallucination_tiers(hallu_path: Path | None = None):
     return _save(fig, "hallucination_tiers.png")
 
 
-def plot_all(results: dict, hallu_path: Path | None = None) -> list:
-    return [p for p in [plot_dimension_scores(results), plot_difficulty_tiers(results),
-                        plot_win_rates(results), plot_latency_performance(results),
-                        plot_citation_grounding(results),
-                        plot_hallucination_tiers(hallu_path)] if p]
+def plot_latency_breakdown(latency_data_or_path: Path | dict | None = None):
+    """Stacked bar chart of retrieval vs generation latencies across systems."""
+    from src.config import RESULTS_DIR
+
+    if latency_data_or_path is None:
+        latency_data_or_path = RESULTS_DIR / "latency_breakdown.json"
+    if isinstance(latency_data_or_path, (str, Path)):
+        p = Path(latency_data_or_path)
+        if not p.exists():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    else:
+        data = latency_data_or_path
+
+    ret_lats = data.get("retrieval_latency_seconds", {})
+    gen_lats = data.get("generation_latency_seconds", {})
+    systems = [s for s in SYSTEM_ORDER if s in ret_lats or s in gen_lats]
+    if not systems:
+        systems = list(ret_lats.keys()) or list(gen_lats.keys())
+    if not systems:
+        return None
+
+    r_vals = [ret_lats.get(s, 0.0) for s in systems]
+    g_vals = [gen_lats.get(s, 0.0) for s in systems]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    # Panel 1: Stacked Bar Chart
+    x = np.arange(len(systems))
+    width = 0.5
+    b1 = ax1.bar(x, r_vals, width, label="Retrieval Time (s)", color="#0d6efd", alpha=0.85)
+    b2 = ax1.bar(x, g_vals, width, bottom=r_vals, label="Generation Time (s)", color="#ffc107", alpha=0.85)
+    ax1.set_ylabel("Latency (seconds)")
+    ax1.set_title("End-to-End Latency Disentanglement")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(systems, rotation=15, fontsize=8)
+    ax1.legend()
+
+    for idx, (r, g) in enumerate(zip(r_vals, g_vals)):
+        tot = r + g
+        ax1.text(idx, tot + 0.05, f"{tot:.2f}s", ha="center", fontsize=8, fontweight="bold")
+
+    # Panel 2: HCAD Stage Breakdown (if available)
+    breakdown = data.get("hcad_stage_breakdown_seconds", {})
+    if breakdown:
+        stage_names = [k.replace("t_", "").replace("_", " ").capitalize() for k in breakdown.keys() if k != "t_total_retrieval"]
+        stage_vals = [v for k, v in breakdown.items() if k != "t_total_retrieval"]
+        if stage_vals and sum(stage_vals) > 0:
+            ax2.barh(stage_names, stage_vals, color="#198754", alpha=0.8)
+            ax2.set_xlabel("Time (seconds)")
+            ax2.set_title("HCAD-RAG Stage-by-Stage Retrieval Breakdown")
+            for i, v in enumerate(stage_vals):
+                ax2.text(v + 0.001, i, f" {v:.3f}s", va="center", fontsize=8)
+        else:
+            ax2.text(0.5, 0.5, "Stage breakdown unprofiled", ha="center", va="center")
+    else:
+        ax2.text(0.5, 0.5, "No stage breakdown data", ha="center", va="center")
+
+    fig.suptitle("Latency Profiling & Component Disentanglement (Tri-Arm Protocol)", y=1.02)
+    return _save(fig, "latency_breakdown.png")
+
+
+def plot_polarity_discrimination(polarity_data_or_path: Path | dict | None = None):
+    """Bar chart comparing Indication vs Contraindication fidelity & Error Rates."""
+    from src.config import RESULTS_DIR
+
+    if polarity_data_or_path is None:
+        polarity_data_or_path = RESULTS_DIR / "polarity_benchmark_results.json"
+    if isinstance(polarity_data_or_path, (str, Path)):
+        p = Path(polarity_data_or_path)
+        if not p.exists():
+            return None
+        data = json.loads(p.read_text(encoding="utf-8"))
+    else:
+        data = polarity_data_or_path
+
+    summary = data.get("summary_metrics", {})
+    if not summary:
+        return None
+
+    systems = list(summary.keys())
+    ind_fid = [summary[s].get("indication_fidelity_pct", 0.0) for s in systems]
+    contra_fid = [summary[s].get("contraindication_fidelity_pct", 0.0) for s in systems]
+    inv_err = [summary[s].get("polarity_inversion_error_rate_pct", 0.0) for s in systems]
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.2))
+
+    # Panel 1: Fidelity Accuracies
+    x = np.arange(len(systems))
+    width = 0.35
+    b1 = ax1.bar(x - width/2, ind_fid, width, label="Indication Fidelity (%)", color="#198754")
+    b2 = ax1.bar(x + width/2, contra_fid, width, label="Contraindication Fidelity (%)", color="#0d6efd")
+    ax1.set_ylabel("Fidelity Score (%)")
+    ax1.set_ylim(0, 105)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([s.split("(")[0].strip() for s in systems], rotation=20, fontsize=8)
+    ax1.bar_label(b1, fmt="%.0f%%", fontsize=7, padding=2)
+    ax1.bar_label(b2, fmt="%.0f%%", fontsize=7, padding=2)
+    ax1.set_title("Clinical Polarity Fidelity (Higher is Better)")
+    ax1.legend(loc="lower right")
+
+    # Panel 2: Inversion Error Rate (Lower is Better)
+    b3 = ax2.bar(x, inv_err, width=0.5, color="#dc3545", alpha=0.85)
+    ax2.set_ylabel("Polarity Inversion Error Rate (%)")
+    ax2.set_ylim(0, max(60, max(inv_err) + 15) if inv_err else 50)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([s.split("(")[0].strip() for s in systems], rotation=20, fontsize=8)
+    ax2.bar_label(b3, fmt="%.1f%%", fontsize=7, padding=2)
+    ax2.set_title("Contraindication Inversion Rate (Lower is Better - Safety Critical)")
+
+    fig.suptitle("Clinical Polarity Discrimination Benchmark - Indication vs Contraindication", y=1.02)
+    return _save(fig, "polarity_discrimination.png")
+
+
+def plot_all(results: dict, hallu_path: Path | None = None, latency_path: Path | None = None, polarity_path: Path | None = None) -> list:
+    return [p for p in [
+        plot_dimension_scores(results),
+        plot_difficulty_tiers(results),
+        plot_win_rates(results),
+        plot_latency_performance(results),
+        plot_citation_grounding(results),
+        plot_hallucination_tiers(hallu_path),
+        plot_latency_breakdown(latency_path),
+        plot_polarity_discrimination(polarity_path),
+    ] if p]
+

@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -83,12 +84,20 @@ class HCADRetriever:
         model_name: Optional[str] = None,
         k: float = FILTERING_K,
         fail_on_vector_error: bool = False,
+        enable_decoupling: bool = True,
+        enable_decision_gate: bool = True,
+        enable_aniso: bool = True,
+        enable_hypergraph: bool = True,
     ):
         self._graph = graph
         self._collection = collection
         self.model_name = model_name
         self.k = k
         self.fail_on_vector_error = fail_on_vector_error
+        self.enable_decoupling = enable_decoupling
+        self.enable_decision_gate = enable_decision_gate
+        self.enable_aniso = enable_aniso
+        self.enable_hypergraph = enable_hypergraph
 
         self._ner: Optional[object] = None
         self._relation_extractor: Optional[object] = None
@@ -102,6 +111,9 @@ class HCADRetriever:
         self._node_lookup: Optional[dict] = None
         self._decision_gate: Optional[object] = None
         self._entity_res_cache: dict[str, Optional[str]] = {}
+        # Latency breakdown telemetry (stage-by-stage profiling)
+        self.last_latency_breakdown: dict[str, float] = {}
+        self.last_latency_telemetry: dict[str, float] = {}
         # Learned query-adaptive tensor (HCAD_TENSOR_MODE=learned). The
         # override hook is used ONLY by the tensor trainer to evaluate
         # sampled weight vectors; production retrieval always predicts
@@ -425,6 +437,9 @@ class HCADRetriever:
         except Exception as e:
             self._handle_vector_error(e)
 
+        if not self.enable_hypergraph:
+            return vector_cands
+
         # -- entity resolution (shared by channels 2 and 3) -------------------
         name_to_node = getattr(self.graph, "name_to_node", {}) or {}
         graph_nx = getattr(self.graph, "graph", self.graph)
@@ -557,6 +572,7 @@ class HCADRetriever:
         """Retrieve and rank candidate contexts using decoupled structural similarity and adaptive filtering."""
         self._ensure_components()
         k = k if k is not None else self.k
+        t_start = time.perf_counter()
 
         # Per-query diagnostics are reset up front so an early return (no
         # candidates) can never leave the previous query's pool/sims behind
@@ -569,7 +585,11 @@ class HCADRetriever:
         self._last_dense_sims = None
         self._last_dense_weight = 0.0
 
+        t0 = time.perf_counter()
         entities = self._ner.extract_entities(query)
+        t_ner = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
         relations = self._relation_extractor.extract_rules(query, entities)
         # Query relation labels ("TREATS") rendered with the same canonical
         # verb phrases the candidates' relation channel uses.
@@ -577,10 +597,17 @@ class HCADRetriever:
             {**r, "relation": map_query_relation(str(r.get("relation", "")))}
             for r in (relations or []) if isinstance(r, dict)
         ]
+        t_relation = time.perf_counter() - t0
 
+        t0 = time.perf_counter()
+        # Ablation: w/o decoupling sets orthogonalization strength to 0.0
+        decouple_kwargs = {"return_presence": True}
+        if not self.enable_decoupling:
+            decouple_kwargs["ortho_strength"] = 0.0
         Q, query_presence = self._decoupler.decouple(
-            query, entities=entities, relations=query_relations, return_presence=True
+            query, entities=entities, relations=query_relations, **decouple_kwargs
         )
+        t_decouple = time.perf_counter() - t0
 
         all_entity_names = [
             e.get("text", "") for ents in entities.values() for e in ents if isinstance(e, dict)
@@ -589,11 +616,12 @@ class HCADRetriever:
         all_entity_names = [name for name in all_entity_names if name and isinstance(name, str)]
         primary_entity = all_entity_names[0] if all_entity_names else ""
 
-        tensor = self._get_tensor()
+        t0 = time.perf_counter()
+        tensor = self._get_tensor() if self.enable_aniso else None
         lam_override = a_override = None
-        if self._tensor_override is not None:
+        if self._tensor_override is not None and self.enable_aniso:
             lam_override, a_override = self._tensor_override
-        if tensor is not None or lam_override is not None:
+        if (tensor is not None or lam_override is not None) and self.enable_aniso:
             import torch
             from src.core.dynamic_tensor import make_query_features
             deg, conf, idf = self._transformer.graph_block_stats(
@@ -625,21 +653,37 @@ class HCADRetriever:
             weights = lam_t.detach().cpu().numpy().astype(np.float64)
             component_a = a_t.detach().cpu().numpy()
         else:
-            if aniso_dim_weighting_enabled():
+            if self.enable_aniso and aniso_dim_weighting_enabled():
                 weights = self._transformer.compute_weights(self.graph, primary_entity)
             else:
                 # isotropic: weighted cosine reduces to plain cosine
                 dim = int(np.asarray(Q).shape[-1])
                 weights = np.full(dim, 1.0 / dim, dtype=np.float32)
             component_a = None
+        t_weights = time.perf_counter() - t0
 
+        t0 = time.perf_counter()
         candidates = self._get_candidate_contexts(
             query, entities, n_vector=n_candidates, relations=relations
         )
+        t_cand_gen = time.perf_counter() - t0
         if not candidates:
+            self.last_latency_breakdown = {
+                "t_ner": round(t_ner, 4),
+                "t_relation": round(t_relation, 4),
+                "t_decouple": round(t_decouple, 4),
+                "t_weights": round(t_weights, 4),
+                "t_cand_gen": round(t_cand_gen, 4),
+                "t_batch_decouple": 0.0,
+                "t_scoring": 0.0,
+                "t_filter": 0.0,
+                "t_decision_gate": 0.0,
+                "t_total_retrieval": round(time.perf_counter() - t_start, 4),
+            }
             return []
 
         # Vectorized batch decoupling of all candidates in a single tensor operation
+        t0 = time.perf_counter()
         candidate_docs = []
         entities_list = []
         relations_list = []
@@ -671,13 +715,19 @@ class HCADRetriever:
             entities_list.append(ctx_entities_dict)
             relations_list.append(ctx_relations_list)
 
+        batch_kwargs = {"as_numpy": True, "return_presence": True}
+        if not self.enable_decoupling:
+            batch_kwargs["ortho_strength"] = 0.0
+
         C_batch, candidate_presence = self._decoupler.decouple_batch(
             candidate_docs,
             entities_list=entities_list,
             relations_list=relations_list,
-            as_numpy=True,
-            return_presence=True,
+            **batch_kwargs,
         )
+        t_batch_decouple = time.perf_counter() - t0
+
+        t0 = time.perf_counter()
         if component_a is not None:
             channel_weights = (float(component_a[0]), float(component_a[1]),
                                float(component_a[2]))
@@ -685,7 +735,7 @@ class HCADRetriever:
             channel_weights = (SCORE_WEIGHT_ENTITY, SCORE_WEIGHT_RELATION,
                                SCORE_WEIGHT_MODIFIER)
 
-        if presence_masking_enabled():
+        if presence_masking_enabled() and self.enable_decoupling:
             # Deliverable-B: query-conditioned channel-presence masking.
             phi_scores, masked_sims = self._transformer.compute_masked_similarities(
                 Q, C_batch, weights,
@@ -722,11 +772,7 @@ class HCADRetriever:
 
         # Per-channel similarities for this (query, candidate pool)
         # pair: the listwise trainer learns the query-adaptive channel
-        # weights over exactly these columns. The PRE-GATE candidate
-        # pool is stashed too, index-aligned with the sims rows - the
-        # trainer's listwise loss runs over the full pool (gold may be
-        # present but gated out, and the loss must be able to teach the
-        # channel weights to rank it back in).
+        # weights over exactly these columns.
         self._last_channel_sims = self._transformer.compute_channel_similarities(
             Q, C_batch, weights)
         self._last_candidate_pool = list(candidates)
@@ -735,31 +781,56 @@ class HCADRetriever:
         self._last_phi_scores = np.asarray(phi_scores)
         self._last_query_presence = query_presence
         self._last_candidate_presence = candidate_presence
+        t_scoring = time.perf_counter() - t0
 
+        t0 = time.perf_counter()
         filtered = self._filter.filter_contexts(
             candidates,
             np.asarray(phi_scores),
             k=k,
             max_top_k=MAX_EVIDENCE_ITEMS,
         )
+        t_filter = time.perf_counter() - t0
 
-        # the previous "Fix #2" re-admitted candidates
-        # BELOW the absolute floor Phi_min = 0.10 whenever both gates rejected
-        # everything - defeating Gate 1 exactly on out-of-domain queries.
-        # Correct behavior: abstain (empty context) so the generator relies on
-        # parametric knowledge rather than being distracted by noise.
         if not filtered:
             logger.warning(
                 "All %d candidates rejected by dual-gating (floor %.2f). "
                 "Abstaining from retrieval - parametric mode.",
                 len(candidates), MIN_PHI_SCORE,
             )
+            self.last_latency_breakdown = {
+                "t_ner": round(t_ner, 4),
+                "t_relation": round(t_relation, 4),
+                "t_decouple": round(t_decouple, 4),
+                "t_weights": round(t_weights, 4),
+                "t_cand_gen": round(t_cand_gen, 4),
+                "t_batch_decouple": round(t_batch_decouple, 4),
+                "t_scoring": round(t_scoring, 4),
+                "t_filter": round(t_filter, 4),
+                "t_decision_gate": 0.0,
+                "t_total_retrieval": round(time.perf_counter() - t_start, 4),
+            }
             return []
 
+        t0 = time.perf_counter()
         # JEV-inspired Decision Gate: Verify relevance & prune token bloat
-        if self._decision_gate is not None:
+        # Ablation: w/o Decision Gate bypasses this stage
+        if self.enable_decision_gate and self._decision_gate is not None:
             filtered = self._decision_gate.verify_and_prune_candidates(filtered, query)
+        t_decision_gate = time.perf_counter() - t0
 
+        self.last_latency_breakdown = {
+            "t_ner": round(t_ner, 4),
+            "t_relation": round(t_relation, 4),
+            "t_decouple": round(t_decouple, 4),
+            "t_weights": round(t_weights, 4),
+            "t_cand_gen": round(t_cand_gen, 4),
+            "t_batch_decouple": round(t_batch_decouple, 4),
+            "t_scoring": round(t_scoring, 4),
+            "t_filter": round(t_filter, 4),
+            "t_decision_gate": round(t_decision_gate, 4),
+            "t_total_retrieval": round(time.perf_counter() - t_start, 4),
+        }
         return filtered
 
     def retrieve_and_generate(
@@ -773,15 +844,36 @@ class HCADRetriever:
 
         self._ensure_components()
         model = model or self.model_name
+        t0 = time.perf_counter()
         if contexts is None:
             contexts = self.retrieve(query, k=k)
+            t_retrieval = self.last_latency_breakdown.get(
+                "t_total_retrieval", time.perf_counter() - t0
+            )
+        else:
+            t_retrieval = 0.0
+
         messages = self._prompt_builder.build_rag_prompt(query, contexts)
 
+        t_gen_start = time.perf_counter()
         try:
             client = UnifiedLLMClient(model=model, temperature=LLM_TEMPERATURE, max_tokens=LLM_MAX_TOKENS)
-            return client.chat(messages)
+            response = client.chat(messages)
+            t_generation = time.perf_counter() - t_gen_start
+            self.last_latency_telemetry = {
+                "retrieval": t_retrieval,
+                "generation": t_generation,
+                "total": t_retrieval + t_generation,
+            }
+            return response
         except Exception as e:
             logger.error(f"Generation failed: {e}")
+            t_generation = time.perf_counter() - t_gen_start
+            self.last_latency_telemetry = {
+                "retrieval": t_retrieval,
+                "generation": t_generation,
+                "total": t_retrieval + t_generation,
+            }
             return f"[Error: LLM generation failed - {e}]"
 
     def answer_mcq(

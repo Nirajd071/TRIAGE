@@ -621,10 +621,20 @@ def generate_paper_protocol_questions(num_samples: int, generator=None,
     log_results=log_base_paper_results,
 )
 def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
-                  question_pool: str = "test"):
+                  question_pool: str = "test", use_multi_judge: Optional[bool] = None):
     """Execute complete base paper evaluation benchmark across the 3 systems."""
-    logger.info("Initializing Base Paper Evaluator...")
-    evaluator = BasePaperEvaluator()
+    is_multi_judge = (
+        use_multi_judge
+        if use_multi_judge is not None
+        else os.getenv("HCAD_MULTI_JUDGE", "0") == "1"
+    )
+    if is_multi_judge:
+        from src.evaluation.base_paper_evaluator import MultiJudgeEvaluator
+        evaluator = MultiJudgeEvaluator()
+        logger.info("Initializing Multi-Judge Evaluator panel: %s", evaluator.judge_names)
+    else:
+        logger.info("Initializing Base Paper Evaluator...")
+        evaluator = BasePaperEvaluator()
 
     # Import system pipelines
     from src.baselines.baseline_llm import BaselineLLM
@@ -697,6 +707,13 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
     )
     logger.info("Resuming: %d samples already checkpointed.", len(completed_questions))
 
+    # Track disentangled latencies across session
+    disentangled_latencies = {
+        "Baseline LLM": {"retrieval": [], "generation": []},
+        "Vanilla RAG": {"retrieval": [], "generation": []},
+        "HCAD-RAG": {"retrieval": [], "generation": []},
+    }
+
     for idx, sample in enumerate(samples):
         q = sample["question"]
         ref = sample["reference"]
@@ -705,42 +722,73 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
             continue
         logger.info(f"Evaluating Sample {idx+1}/{len(samples)}: {q[:70]}...")
 
-        # 1. Generate responses & measure retrieval latencies
-        # Baseline LLM
+        # 1. Generate responses & measure retrieval and generation latencies separately
+        # Baseline LLM (Zero-Retrieval / Closed-Book)
+        t0 = time.perf_counter()
         resp_baseline = _validate_generated_response("Baseline LLM", baseline_llm.generate(q))
-        logger.info("  Baseline LLM response (%d chars): %.120s...", len(resp_baseline), resp_baseline)
+        t_base_gen = time.perf_counter() - t0
+        t_base_ret = 0.0
+        disentangled_latencies["Baseline LLM"]["retrieval"].append(t_base_ret)
+        disentangled_latencies["Baseline LLM"]["generation"].append(t_base_gen)
+        logger.info("  Baseline LLM response (%d chars, gen=%.2fs): %.120s...", len(resp_baseline), t_base_gen, resp_baseline)
 
         # Vanilla RAG
         t0 = time.perf_counter()
         vanilla_contexts = vanilla_rag.retrieve(q, top_k=5)
         t_vanilla_ret = time.perf_counter() - t0
+        t0 = time.perf_counter()
         resp_vanilla = _validate_generated_response(
             "Vanilla RAG", vanilla_rag.retrieve_and_generate(q, contexts=vanilla_contexts)
         )
+        t_vanilla_gen = time.perf_counter() - t0
         vanilla_evidence = _format_retrieved_evidence(vanilla_contexts, "Doc")  # neutral tags
-        logger.info("  Vanilla RAG response (%d chars, %d contexts): %.120s...", len(resp_vanilla), len(vanilla_contexts), resp_vanilla)
+        disentangled_latencies["Vanilla RAG"]["retrieval"].append(t_vanilla_ret)
+        disentangled_latencies["Vanilla RAG"]["generation"].append(t_vanilla_gen)
+        logger.info("  Vanilla RAG response (%d chars, ret=%.2fs, gen=%.2fs): %.120s...", len(resp_vanilla), t_vanilla_ret, t_vanilla_gen, resp_vanilla)
 
         # HCAD-RAG
         t0 = time.perf_counter()
         hcad_contexts = hcad_rag.retrieve(q)
         t_hcad_ret = time.perf_counter() - t0
-        logger.info("  HCAD-RAG retrieved %d contexts in %.1fs", len(hcad_contexts), t_hcad_ret)
+        t0 = time.perf_counter()
         resp_hcad = _validate_generated_response(
             "HCAD-RAG", hcad_rag.retrieve_and_generate(q, contexts=hcad_contexts)
         )
+        t_hcad_gen = time.perf_counter() - t0
         hcad_evidence = _format_retrieved_evidence(hcad_contexts, "Doc")  # neutral tags
-        logger.info("  HCAD-RAG response (%d chars): %.120s...", len(resp_hcad), resp_hcad)
+        disentangled_latencies["HCAD-RAG"]["retrieval"].append(t_hcad_ret)
+        disentangled_latencies["HCAD-RAG"]["generation"].append(t_hcad_gen)
+        logger.info("  HCAD-RAG retrieved %d contexts in %.2fs (gen=%.2fs): %.120s...", len(hcad_contexts), t_hcad_ret, t_hcad_gen, resp_hcad)
 
         # 2. Scoring-Based Assessment (0-100)
-        score_base = evaluator.evaluate_scoring(
+        score_base_raw = evaluator.evaluate_scoring(
             q, resp_baseline, ref, fallback_on_error=True
         )
-        score_van = evaluator.evaluate_scoring(
+        score_van_raw = evaluator.evaluate_scoring(
             q, resp_vanilla, ref, answer_evidence=vanilla_evidence, fallback_on_error=True
         )
-        score_hcad = evaluator.evaluate_scoring(
+        score_hcad_raw = evaluator.evaluate_scoring(
             q, resp_hcad, ref, answer_evidence=hcad_evidence, fallback_on_error=True
         )
+
+        def _to_scoring_result(res):
+            if isinstance(res, dict) and "consensus" in res:
+                from src.evaluation.base_paper_evaluator import ScoringResult
+                c = res["consensus"]
+                return ScoringResult(
+                    comprehensiveness=c["comprehensiveness"],
+                    diversity=c["diversity"],
+                    empowerment=c["empowerment"],
+                    logical=c["logical"],
+                    readability=c["readability"],
+                    overall_score=c["overall_score"],
+                    rationale="Multi-judge consensus",
+                )
+            return res
+
+        score_base = _to_scoring_result(score_base_raw)
+        score_van = _to_scoring_result(score_van_raw)
+        score_hcad = _to_scoring_result(score_hcad_raw)
         logger.info("  Scores - Baseline: %.1f, Vanilla: %.1f, HCAD: %.1f",
                      score_base.overall_score, score_van.overall_score, score_hcad.overall_score)
 
@@ -851,6 +899,17 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
                 "latency": {
                     "Vanilla RAG": t_vanilla_ret,
                     "HCAD-RAG": t_hcad_ret,
+                    "Baseline LLM": 0.0,
+                },
+                "latency_disentangled": {
+                    "Baseline LLM": {"retrieval": t_base_ret, "generation": t_base_gen, "total": t_base_ret + t_base_gen},
+                    "Vanilla RAG": {"retrieval": t_vanilla_ret, "generation": t_vanilla_gen, "total": t_vanilla_ret + t_vanilla_gen},
+                    "HCAD-RAG": {
+                        "retrieval": t_hcad_ret,
+                        "generation": t_hcad_gen,
+                        "total": t_hcad_ret + t_hcad_gen,
+                        "hcad_stage_breakdown": getattr(hcad_rag, "last_latency_breakdown", {}),
+                    },
                 },
                 "retrieval": sample_retrieval,
                 "citations": sample_citations,
@@ -939,6 +998,34 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
     if "Baseline LLM" in final_scores:
         avg_latencies.setdefault("Baseline LLM", 0.0)
 
+    # Disentangled generation and total latency breakdown
+    avg_gen_latencies = {
+        sys_name: (
+            float(sum(vals["generation"]) / len(vals["generation"]))
+            if vals["generation"]
+            else 0.0
+        )
+        for sys_name, vals in disentangled_latencies.items()
+    }
+    avg_total_latencies = {
+        sys_name: round(avg_latencies.get(sys_name, 0.0) + avg_gen_latencies.get(sys_name, 0.0), 3)
+        for sys_name in avg_latencies
+    }
+    latency_breakdown_data = {
+        "retrieval_latency_seconds": avg_latencies,
+        "generation_latency_seconds": avg_gen_latencies,
+        "total_latency_seconds": avg_total_latencies,
+        "hcad_stage_breakdown_seconds": getattr(hcad_rag, "last_latency_breakdown", {}),
+    }
+    latency_file = RESULTS_DIR / "latency_breakdown.json"
+    try:
+        latency_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(latency_file, "w", encoding="utf-8") as f:
+            json.dump(latency_breakdown_data, f, indent=2)
+        logger.info("Detailed latency breakdown saved to %s", latency_file)
+    except Exception as e:
+        logger.warning("Could not save latency breakdown: %s", e)
+
     # Robustness metric 1+2: NDCG@K / Recall@K over paper-protocol samples.
     retrieval_quality: Dict[str, Any] = {
         "k": RETRIEVAL_K,
@@ -1007,11 +1094,17 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
         else:
             significance_testing[comparison] = None
 
+    judge_dict = (
+        {"provider": evaluator.judge.provider, "model": evaluator.judge.model}
+        if hasattr(evaluator, "judge")
+        else {"provider": "multi_judge_ensemble", "models": getattr(evaluator, "judge_names", [])}
+    )
+
     summary_results = {
         "run_manifest": {  # provenance for every result file
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "num_samples": len(samples),
-            "judge": {"provider": evaluator.judge.provider, "model": evaluator.judge.model},
+            "judge": judge_dict,
             "prompt_mode": "zero_shot" if not __import__("src.config", fromlist=["ENABLE_FEW_SHOT"]).ENABLE_FEW_SHOT else "few_shot",
             "random_seed": RANDOM_SEED,
             "question_pool": question_pool,
@@ -1032,6 +1125,9 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
         "selection_based_assessment": final_win_rates,
         "selection_based_assessment_by_source": win_rates_by_source,
         "retrieval_latency_seconds": avg_latencies,
+        "generation_latency_seconds": avg_gen_latencies,
+        "total_latency_seconds": avg_total_latencies,
+        "latency_breakdown": latency_breakdown_data,
         "retrieval_quality": retrieval_quality,
         "citation_precision": citation_summary,
         "grounded_mode": grounded_mode_counts,
@@ -1041,10 +1137,7 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
             source: sum(1 for sample in samples if sample.get("source", "curated") == source)
             for source in sorted({sample.get("source", "curated") for sample in samples})
         },
-        "judge": {
-            "provider": evaluator.judge.provider,
-            "model": evaluator.judge.model,
-        },
+        "judge": judge_dict,
     }
 
     out_file = output_path or (RESULTS_DIR / os.getenv(

@@ -153,6 +153,7 @@ class HallucinationEvaluator:
         def classify(question: str, answer: str, knowledge: str, sample_index: int) -> bool:
             messages = builder.build_hallucination_prompt(question, answer, knowledge)
             try:
+                import ollama
                 response = ollama.chat(
                     model=model_name,
                     messages=messages,
@@ -160,13 +161,18 @@ class HallucinationEvaluator:
                 )
                 prediction = response.message.content.strip().upper().rstrip(".!")
             except Exception as exc:
-                raise RuntimeError(
-                    f"MedHallu classifier failed for sample {sample_index}: {exc}"
-                ) from exc
+                try:
+                    from src.core.llm_client import UnifiedLLMClient
+                    client = UnifiedLLMClient(model=model_name, temperature=0.0, max_tokens=16)
+                    prediction = client.chat(messages).strip().upper().rstrip(".!")
+                except Exception as inner_exc:
+                    raise RuntimeError(
+                        f"MedHallu classifier failed for sample {sample_index}: {exc}"
+                    ) from inner_exc
 
-            if prediction == "HALLUCINATED":
+            if prediction == "HALLUCINATED" or ("HALLUCINATED" in prediction and "FAITHFUL" not in prediction):
                 return True
-            if prediction == "FAITHFUL":
+            if prediction == "FAITHFUL" or ("FAITHFUL" in prediction and "HALLUCINATED" not in prediction):
                 return False
             raise ValueError(
                 f"MedHallu classifier returned an invalid hallucination label "

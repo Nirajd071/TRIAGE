@@ -461,8 +461,18 @@ def _question_set_id(samples: list[dict]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 def _completed_questions_from_checkpoint(
-    checkpoint_path: Path, pool: str, question_set_id: str
+    checkpoint_path: Path, pool: str, question_set_id: str,
+    required_arms: Optional[Sequence[str]] = None,
+    required_judges: Optional[Sequence[str]] = None,
 ) -> set[str]:
+    """Questions that need no re-evaluation in this run.
+
+    When ``required_arms`` / ``required_judges`` are given, only schema-2
+    records that cover every requested arm and were scored by exactly the
+    configured judges count as complete. Older records (single-judge,
+    three-arm checkpoints restored from a previous session) are re-run
+    instead of being silently mixed into the new protocol.
+    """
     completed: set[str] = set()
     if checkpoint_path.exists():
         with open(checkpoint_path, "r", encoding="utf-8") as f:
@@ -478,6 +488,15 @@ def _completed_questions_from_checkpoint(
                     continue
                 if (record.get("question_pool") == pool
                         and record.get("question_set_id") == question_set_id):
+                    if required_arms is not None or required_judges is not None:
+                        if record.get("schema") != 2:
+                            continue
+                        if required_arms is not None and not set(required_arms) <= set(
+                                (record.get("arms") or {}).keys()):
+                            continue
+                        if required_judges is not None and list(
+                                record.get("judges") or []) != list(required_judges):
+                            continue
                     completed.add(record["question"])
     return completed
 
@@ -1237,7 +1256,8 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
     checkpoint_upload_every = int(os.getenv("WANDB_CHECKPOINT_EVERY", "5"))
     evaluated_this_session = 0
     completed_questions = _completed_questions_from_checkpoint(
-        checkpoint_path, question_pool, question_set_id
+        checkpoint_path, question_pool, question_set_id,
+        required_arms=arm_ids, required_judges=judge_names,
     )
     logger.info("Resuming: %d samples already checkpointed.", len(completed_questions))
     pairs = selection_pairs(arm_ids)
@@ -1345,7 +1365,11 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
             "tensor_mode": os.environ.get("HCAD_TENSOR_MODE", "static"),
         },
         **aggregates,
-        "grounded_mode": _grounded_mode_counts(checkpoint_path, question_pool, question_set_id),
+        # counted from the de-duplicated newest record per question
+        "grounded_mode": {
+            mode: sum(1 for rec in records["per_question"] if rec.get("grounded_mode") == mode)
+            for mode in ("grounded", "parametric")
+        },
         "num_samples": len(samples),
         "sample_source_counts": {
             source: sum(1 for s in samples if s.get("source", "curated") == source)

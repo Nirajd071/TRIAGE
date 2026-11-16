@@ -565,3 +565,26 @@ def test_cli_exposes_revision_commands():
     assert b.ablations and b.arms == "bm25,hcad"
     assert p.parse_args(["medhallu", "--system", "hcad"]).system == "hcad"
     assert p.parse_args(["figures"]).func.__name__ == "cmd_figures"
+
+
+def test_resume_reruns_legacy_or_incompatible_records(tmp_path):
+    from src.evaluation.run_base_paper_benchmark import _completed_questions_from_checkpoint
+
+    ckpt = tmp_path / "c.jsonl"
+    base = {"question_pool": "test", "question_set_id": "s"}
+    rows = [
+        {**base, "question": "legacy"},                                   # schema 1
+        {**base, "question": "ok", "schema": 2,
+         "arms": {"closed_book": "", "dense": "", "hcad": ""}, "judges": ["j1", "j2"]},
+        {**base, "question": "fewer_arms", "schema": 2,
+         "arms": {"hcad": ""}, "judges": ["j1", "j2"]},
+        {**base, "question": "other_judges", "schema": 2,
+         "arms": {"closed_book": "", "dense": "", "hcad": ""}, "judges": ["j1"]},
+    ]
+    ckpt.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    done = _completed_questions_from_checkpoint(
+        ckpt, "test", "s", required_arms=["closed_book", "dense", "hcad"],
+        required_judges=["j1", "j2"])
+    assert done == {"ok"}
+    # legacy call signature keeps its old behaviour
+    assert len(_completed_questions_from_checkpoint(ckpt, "test", "s")) == 4

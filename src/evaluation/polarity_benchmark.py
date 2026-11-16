@@ -381,12 +381,22 @@ def make_hcad_ranker(corpus: Sequence[Dict], retriever=None,
         return out
 
     def rank(q: str) -> List[str]:
+        import os
+
         original = retriever._get_candidate_contexts
         retriever._get_candidate_contexts = lambda *a, **kw: candidates()
+        # The ranking uses PRE-gate scores, so the decision gate (a live
+        # TypeSafe API call when TYPESAFE_API_KEY is set) is skipped here.
+        previous_gate = os.environ.get("HCAD_DECISION_GATE")
+        os.environ["HCAD_DECISION_GATE"] = "0"
         try:
             retriever.retrieve(q)
         finally:
             retriever._get_candidate_contexts = original
+            if previous_gate is None:
+                os.environ.pop("HCAD_DECISION_GATE", None)
+            else:
+                os.environ["HCAD_DECISION_GATE"] = previous_gate
         pool = retriever._last_candidate_pool or []
         phi = retriever._last_phi_scores
         if not pool or phi is None:

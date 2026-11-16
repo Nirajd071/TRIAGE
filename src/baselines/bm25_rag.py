@@ -118,9 +118,38 @@ class BM25RAG:
         # Build index from vector store collection or fallback corpus
         self._build_index_from_store()
 
-    def _build_index_from_store(self):
-        """Construct BM25 index from the existing vector store collection."""
-        from src.data.build_vector_store import load_vector_store
+        # Try direct sqlite3 extraction for fast ingestion without SQL variable limits
+        sqlite_db = Path("data/vectordb/chroma.sqlite3")
+        if sqlite_db.exists():
+            try:
+                import sqlite3
+                conn = sqlite3.connect(sqlite_db)
+                cur = conn.cursor()
+                cur.execute("SELECT id, string_value FROM embedding_metadata WHERE key = 'chroma:document'")
+                rows = cur.fetchall()
+                if rows:
+                    logger.info("Ingesting %d docs from Chroma SQLite store for BM25...", len(rows))
+                    corpus_docs = []
+                    tokenized_corpus = []
+                    for doc_id, text in rows:
+                        if not text:
+                            continue
+                        tokens = tokenize_corpus_text(text)
+                        if not tokens:
+                            continue
+                        corpus_docs.append({"id": str(doc_id), "document": text, "metadata": {}})
+                        tokenized_corpus.append(tokens)
+                    if tokenized_corpus:
+                        if HAS_RANK_BM25:
+                            self.bm25 = BM25Okapi(tokenized_corpus, k1=self.k1, b=self.b)
+                        else:
+                            self.bm25 = _SimpleBM25(tokenized_corpus, k1=self.k1, b=self.b)
+                        self.corpus_docs = corpus_docs
+                        self._save_index()
+                        logger.info("BM25 index successfully built with %d documents via direct SQLite.", len(self.corpus_docs))
+                        return
+            except Exception as e:
+                logger.warning("Direct SQLite read failed: %s. Falling back to ChromaDB API...", e)
 
         try:
             collection = load_vector_store()
@@ -130,7 +159,7 @@ class BM25RAG:
                 return
 
             logger.info("Building BM25 index from ChromaDB (%d documents)...", total)
-            batch_size = 5000
+            batch_size = 2000
             corpus_docs = []
             tokenized_corpus = []
 
@@ -178,8 +207,14 @@ class BM25RAG:
         except Exception as e:
             logger.warning("Failed to persist BM25 index: %s", e)
 
-    def retrieve(self, query: str, top_k: int = BM25_TOP_K) -> List[Dict[str, Any]]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        k: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """Retrieve top-K passages by BM25Okapi lexical score."""
+        target_k = k if k is not None else (top_k if top_k is not None else BM25_TOP_K)
         if not self.bm25 or not self.corpus_docs:
             logger.warning("BM25 index is uninitialized; returning empty retrieval.")
             return []
@@ -189,7 +224,7 @@ class BM25RAG:
             return []
 
         scores = self.bm25.get_scores(tokens)
-        top_indices = np.argsort(scores)[::-1][:top_k]
+        top_indices = np.argsort(scores)[::-1][:target_k]
 
         results = []
         for idx in top_indices:
@@ -197,9 +232,11 @@ class BM25RAG:
             if score <= 0.0:
                 continue
             doc_entry = self.corpus_docs[idx]
+            doc_text = doc_entry["document"]
             results.append({
                 "id": doc_entry["id"],
-                "document": doc_entry["document"],
+                "text": doc_text,
+                "document": doc_text,
                 "metadata": doc_entry["metadata"],
                 "score": score,
                 "retriever": "bm25",
@@ -272,11 +309,16 @@ class HybridRAG:
         self.top_k = top_k
         self.system_name = HYBRID_SYSTEM_NAME
 
-    def retrieve(self, query: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        k: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """Retrieve candidates from both dense and sparse channels, fuse scores, and return top-K."""
-        k = top_k or self.top_k
-        dense_results = self.dense_rag.retrieve(query, top_k=k * 2)
-        bm25_results = self.bm25_rag.retrieve(query, top_k=k * 2)
+        target_k = k if k is not None else (top_k if top_k is not None else self.top_k)
+        dense_results = self.dense_rag.retrieve(query, top_k=target_k * 2)
+        bm25_results = self.bm25_rag.retrieve(query, top_k=target_k * 2)
 
         # Min-max normalize scores for fair fusion
         def _normalize(scores: List[float]) -> List[float]:
@@ -293,23 +335,27 @@ class HybridRAG:
         doc_map: Dict[str, Dict[str, Any]] = {}
 
         for c, s_norm in zip(dense_results, dense_scores_norm):
-            doc_id = c.get("id") or str(hash(c.get("document", "")))
+            doc_text = c.get("text") or c.get("document", "")
+            doc_id = c.get("id") or str(hash(doc_text))
             doc_map[doc_id] = {
                 "id": doc_id,
-                "document": c.get("document", ""),
+                "text": doc_text,
+                "document": doc_text,
                 "metadata": c.get("metadata", {}),
                 "dense_score": s_norm,
                 "bm25_score": 0.0,
             }
 
         for c, s_norm in zip(bm25_results, bm25_scores_norm):
-            doc_id = c.get("id") or str(hash(c.get("document", "")))
+            doc_text = c.get("text") or c.get("document", "")
+            doc_id = c.get("id") or str(hash(doc_text))
             if doc_id in doc_map:
                 doc_map[doc_id]["bm25_score"] = s_norm
             else:
                 doc_map[doc_id] = {
                     "id": doc_id,
-                    "document": c.get("document", ""),
+                    "text": doc_text,
+                    "document": doc_text,
                     "metadata": c.get("metadata", {}),
                     "dense_score": 0.0,
                     "bm25_score": s_norm,
@@ -324,7 +370,7 @@ class HybridRAG:
             entry["retriever"] = "hybrid_bm25_dense"
 
         sorted_candidates = sorted(doc_map.values(), key=lambda x: x["score"], reverse=True)
-        return sorted_candidates[:k]
+        return sorted_candidates[:target_k]
 
     def retrieve_and_generate(
         self,

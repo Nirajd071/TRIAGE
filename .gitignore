@@ -16,6 +16,8 @@ data/processed/*
 !data/processed/.gitkeep
 data/vectordb/*
 !data/vectordb/.gitkeep
+data/bm25/*
+!data/bm25/.gitkeep
 models/*.bin
 models/*.safetensors
 results/tables/*.json

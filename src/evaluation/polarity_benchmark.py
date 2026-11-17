@@ -1,577 +1,294 @@
+"""Indication vs. Contraindication Paired-Polarity Benchmark.
+
+Directly tests the paper's titular claim ("Does your retriever know what
+'contraindicated' means?"), which the reviewers noted was never measured.
+
+Design
+------
+Each of the curated drugs contributes a MINIMAL PAIR of evidence
+statements that share the drug entity and differ in clinical polarity:
+
+    +  "Metformin is indicated as first-line therapy for type 2 diabetes ..."
+    -  "Metformin is contraindicated in severe renal impairment ..."
+
+and four queries (2 polarities x 2 phrasings):
+
+    indication / lexical      "What is metformin indicated for?"
+    indication / paraphrase   "Which condition is metformin used to treat?"
+    opposite   / lexical      "In which condition is metformin contraindicated?"
+    opposite   / paraphrase   "In which patients must metformin be avoided?"
+
+"Paraphrase" queries avoid the polarity keyword that appears in the
+evidence, so a lexical matcher cannot solve them by string overlap. The
+opposite polarity is either an absolute contraindication or a caution /
+avoid-in statement (``polarity_type``).
+
+All 2 x N statements form ONE shared corpus, so every query is ranked
+against its own opposite-polarity twin (the hard distractor) plus every
+other drug's statements.
+
+Metrics (per retriever, per query, then aggregated with bootstrap CIs)
+---------------------------------------------------------------------
+- ``polarity_recall_at_k``  gold (same drug, requested polarity) in top-k.
+- ``polarity_error``        the opposite-polarity twin is ranked ABOVE the
+                            gold statement (full ranking over the corpus).
+- ``polarity_error_rate``   mean of ``polarity_error``.
+- ``pair_accuracy``         both polarities of a drug (same phrasing) are
+                            resolved without a polarity error.
+- ``mrr``                   reciprocal rank of the gold statement.
+- McNemar exact test of HCAD-RAG vs every other arm on per-query errors.
+
+Modes
+-----
+``corpus`` (default, controlled): every arm ranks the same curated corpus.
+    HCAD-RAG runs its stage 1/3/4 scoring (query understanding, semantic
+    decoupling with soft Gram-Schmidt, hybrid Phi) over the corpus as the
+    candidate pool. Two HCAD variants are reported:
+      ``hcad``     text-only candidates (same information as BM25/dense);
+      ``hcad_kg``  candidates carry KG relation metadata, as PrimeKG triples
+                   do in the deployed system (an information advantage,
+                   reported separately for transparency).
+``store``: full retrieval against the built vector store / knowledge graph;
+    a retrieved context counts as gold/opposite by its PrimeKG relation
+    metadata and head-entity match.
 """
-Polarity Discrimination Benchmark for HCAD-RAG.
+from __future__ import annotations
 
-Directly tests the central thesis of HCAD-RAG:
-"Does your retriever know what 'contraindicated' means?"
-
-Evaluates whether retrieval-augmented generation systems can reliably differentiate
-between indicated medical treatments and contraindicated / harmful scenarios.
-
-Metrics:
-1. Polarity_Recall@K: Rate at which safety/contraindication evidence is retrieved
-   when the query explicitly specifies a contraindicated clinical context.
-2. Polarity_Inversion_Error_Rate: Fraction of contraindicated queries where the system
-   dangerously recommends or fails to warn against the contraindicated therapy.
-3. Directional_Separation_Score: Jaccard / Semantic divergence between positive
-   (indicated) and negative (contraindicated) responses for the same clinical entity.
-"""
-
+import argparse
 import json
 import logging
-import os
-import re
 import sys
 import time
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence
 
 import numpy as np
 
-# Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-sys.path.insert(0, str(PROJECT_ROOT))
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import (
-    BASELINE_SYSTEM_NAME,
-    BM25_SYSTEM_NAME,
-    HCAD_SYSTEM_NAME,
-    HYBRID_SYSTEM_NAME,
-    RESULTS_DIR,
-    VANILLA_SYSTEM_NAME,
-)
+from src.config import POLARITY_TOP_K, RESULTS_DIR  # noqa: E402
+from src.evaluation.stats import bootstrap_ci, mcnemar_exact  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
-# 30+ Paired Clinical Test Cases (Indication vs. Contraindication)
+# Curated minimal pairs (established prescribing-information facts)
 # ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class PolarityPair:
+    drug: str
+    indication: str
+    indication_evidence: str
+    opposite: str
+    opposite_evidence: str
+    polarity_type: str  # "contraindication" | "caution"
+
+
+PAIRS: tuple[PolarityPair, ...] = (
+    PolarityPair("Metformin", "type 2 diabetes mellitus",
+                 "Metformin is indicated as first-line pharmacotherapy for type 2 diabetes mellitus to improve glycemic control.",
+                 "severe renal impairment",
+                 "Metformin is contraindicated in severe renal impairment (eGFR below 30 mL/min/1.73 m2) because of the risk of lactic acidosis.",
+                 "contraindication"),
+    PolarityPair("Warfarin", "atrial fibrillation",
+                 "Warfarin is indicated for prevention of stroke and systemic embolism in patients with atrial fibrillation.",
+                 "pregnancy",
+                 "Warfarin is contraindicated in pregnancy because it crosses the placenta and causes embryopathy and fetal hemorrhage.",
+                 "contraindication"),
+    PolarityPair("Propranolol", "hypertension",
+                 "Propranolol is indicated for the management of hypertension, alone or combined with other antihypertensive agents.",
+                 "bronchial asthma",
+                 "Propranolol is contraindicated in bronchial asthma because non-selective beta blockade can precipitate severe bronchospasm.",
+                 "contraindication"),
+    PolarityPair("Isotretinoin", "severe recalcitrant nodular acne",
+                 "Isotretinoin is indicated for severe recalcitrant nodular acne unresponsive to conventional therapy including systemic antibiotics.",
+                 "pregnancy",
+                 "Isotretinoin is contraindicated in pregnancy because it is a potent teratogen causing severe birth defects.",
+                 "contraindication"),
+    PolarityPair("Sildenafil", "erectile dysfunction",
+                 "Sildenafil is indicated for the treatment of erectile dysfunction.",
+                 "concomitant nitrate therapy",
+                 "Sildenafil is contraindicated in patients taking organic nitrates because the combination causes profound hypotension.",
+                 "contraindication"),
+    PolarityPair("Aspirin", "secondary prevention of myocardial infarction",
+                 "Low-dose aspirin is indicated for secondary prevention of myocardial infarction and ischemic stroke.",
+                 "children with viral illness",
+                 "Aspirin should be avoided in children and teenagers with viral illness such as influenza or varicella because of the risk of Reye syndrome.",
+                 "caution"),
+    PolarityPair("Lisinopril", "hypertension",
+                 "Lisinopril is indicated for the treatment of hypertension and of symptomatic heart failure.",
+                 "history of angioedema",
+                 "Lisinopril is contraindicated in patients with a history of angioedema related to previous ACE inhibitor treatment.",
+                 "contraindication"),
+    PolarityPair("Methotrexate", "rheumatoid arthritis",
+                 "Methotrexate is indicated as disease-modifying therapy for active rheumatoid arthritis.",
+                 "pregnancy",
+                 "Methotrexate is contraindicated in pregnant women with non-neoplastic disease because it causes fetal death and congenital anomalies.",
+                 "contraindication"),
+    PolarityPair("Lithium", "bipolar disorder",
+                 "Lithium is indicated for the treatment and maintenance of bipolar disorder to reduce manic episodes.",
+                 "renal impairment and dehydration",
+                 "Lithium requires great caution in renal impairment, dehydration or sodium depletion because lithium toxicity develops rapidly.",
+                 "caution"),
+    PolarityPair("Ibuprofen", "osteoarthritis pain",
+                 "Ibuprofen is indicated for relief of the signs and symptoms of osteoarthritis and mild to moderate pain.",
+                 "active peptic ulcer disease",
+                 "Ibuprofen is contraindicated in active peptic ulcer disease or gastrointestinal bleeding because NSAIDs worsen mucosal injury.",
+                 "contraindication"),
+    PolarityPair("Verapamil", "supraventricular tachycardia",
+                 "Verapamil is indicated for rate control and termination of paroxysmal supraventricular tachycardia.",
+                 "Wolff-Parkinson-White syndrome with atrial fibrillation",
+                 "Verapamil is contraindicated in atrial fibrillation with an accessory pathway such as Wolff-Parkinson-White syndrome because it can accelerate ventricular response.",
+                 "contraindication"),
+    PolarityPair("Clozapine", "treatment-resistant schizophrenia",
+                 "Clozapine is indicated for treatment-resistant schizophrenia after failure of other antipsychotics.",
+                 "history of clozapine-induced agranulocytosis",
+                 "Clozapine must not be restarted in patients with a history of clozapine-induced agranulocytosis or severe neutropenia.",
+                 "contraindication"),
+    PolarityPair("Tamoxifen", "estrogen receptor-positive breast cancer",
+                 "Tamoxifen is indicated for the treatment of estrogen receptor-positive breast cancer.",
+                 "history of deep vein thrombosis or pulmonary embolism",
+                 "Tamoxifen is contraindicated for breast cancer risk reduction in women with a history of deep vein thrombosis or pulmonary embolism.",
+                 "contraindication"),
+    PolarityPair("Ciprofloxacin", "complicated urinary tract infection",
+                 "Ciprofloxacin is indicated for complicated urinary tract infections and pyelonephritis caused by susceptible bacteria.",
+                 "myasthenia gravis",
+                 "Ciprofloxacin should be avoided in patients with myasthenia gravis because fluoroquinolones can exacerbate muscle weakness.",
+                 "caution"),
+    PolarityPair("Succinylcholine", "rapid sequence intubation",
+                 "Succinylcholine is indicated as a short-acting neuromuscular blocker to facilitate rapid sequence intubation.",
+                 "personal or family history of malignant hyperthermia",
+                 "Succinylcholine is contraindicated in patients with a personal or family history of malignant hyperthermia.",
+                 "contraindication"),
+    PolarityPair("Levothyroxine", "hypothyroidism",
+                 "Levothyroxine is indicated as replacement therapy for primary hypothyroidism.",
+                 "uncorrected adrenal insufficiency",
+                 "Levothyroxine is contraindicated in uncorrected adrenal insufficiency because it can precipitate adrenal crisis.",
+                 "contraindication"),
+    PolarityPair("Nitroglycerin", "angina pectoris",
+                 "Nitroglycerin is indicated for the acute relief and prophylaxis of angina pectoris.",
+                 "concomitant phosphodiesterase-5 inhibitor use",
+                 "Nitroglycerin is contraindicated with phosphodiesterase-5 inhibitors such as sildenafil because of severe hypotension.",
+                 "contraindication"),
+    PolarityPair("Amiodarone", "ventricular arrhythmias",
+                 "Amiodarone is indicated for life-threatening recurrent ventricular arrhythmias such as ventricular tachycardia.",
+                 "second- or third-degree atrioventricular block without a pacemaker",
+                 "Amiodarone is contraindicated in second- or third-degree atrioventricular block unless a functioning pacemaker is present.",
+                 "contraindication"),
+    PolarityPair("Spironolactone", "heart failure with reduced ejection fraction",
+                 "Spironolactone is indicated to reduce mortality in heart failure with reduced ejection fraction.",
+                 "hyperkalemia",
+                 "Spironolactone is contraindicated in hyperkalemia because it further raises serum potassium.",
+                 "contraindication"),
+    PolarityPair("Pioglitazone", "type 2 diabetes mellitus",
+                 "Pioglitazone is indicated as an adjunct to diet and exercise to improve glycemic control in type 2 diabetes mellitus.",
+                 "NYHA class III or IV heart failure",
+                 "Pioglitazone is contraindicated in NYHA class III or IV heart failure because it causes fluid retention.",
+                 "contraindication"),
+    PolarityPair("Valproate", "epilepsy",
+                 "Valproate is indicated for generalized and focal epilepsy including absence seizures.",
+                 "significant hepatic dysfunction",
+                 "Valproate is contraindicated in significant hepatic dysfunction because of the risk of fatal hepatotoxicity.",
+                 "contraindication"),
+    PolarityPair("Carbamazepine", "trigeminal neuralgia",
+                 "Carbamazepine is indicated for the treatment of the pain of trigeminal neuralgia.",
+                 "history of bone marrow depression",
+                 "Carbamazepine is contraindicated in patients with a history of bone marrow depression.",
+                 "contraindication"),
+    PolarityPair("Metoclopramide", "diabetic gastroparesis",
+                 "Metoclopramide is indicated for the relief of symptoms of diabetic gastroparesis.",
+                 "gastrointestinal obstruction",
+                 "Metoclopramide is contraindicated when stimulation of motility is dangerous, as in mechanical gastrointestinal obstruction or perforation.",
+                 "contraindication"),
+    PolarityPair("Codeine", "mild to moderate pain",
+                 "Codeine is indicated for the management of mild to moderate pain in adults.",
+                 "children younger than 12 years",
+                 "Codeine is contraindicated in children younger than 12 years because ultra-rapid metabolism can cause fatal respiratory depression.",
+                 "contraindication"),
+    PolarityPair("Tetracycline", "acne vulgaris",
+                 "Tetracycline is indicated as adjunctive therapy for severe acne vulgaris.",
+                 "children under 8 years",
+                 "Tetracycline should be avoided in children under 8 years because it causes permanent tooth discoloration.",
+                 "caution"),
+    PolarityPair("Allopurinol", "chronic gout",
+                 "Allopurinol is indicated as urate-lowering therapy for chronic gout.",
+                 "HLA-B*58:01 carriers",
+                 "Allopurinol should be used with caution or avoided in HLA-B*58:01 carriers because of the high risk of severe cutaneous reactions.",
+                 "caution"),
+    PolarityPair("Abacavir", "HIV-1 infection",
+                 "Abacavir is indicated in combination antiretroviral therapy for HIV-1 infection.",
+                 "HLA-B*57:01 positive patients",
+                 "Abacavir is contraindicated in HLA-B*57:01 positive patients because of the risk of hypersensitivity reactions.",
+                 "contraindication"),
+    PolarityPair("Bupropion", "major depressive disorder",
+                 "Bupropion is indicated for the treatment of major depressive disorder and for smoking cessation.",
+                 "seizure disorder",
+                 "Bupropion is contraindicated in patients with a seizure disorder because it lowers the seizure threshold.",
+                 "contraindication"),
+    PolarityPair("Sumatriptan", "acute migraine",
+                 "Sumatriptan is indicated for the acute treatment of migraine with or without aura.",
+                 "coronary artery disease",
+                 "Sumatriptan is contraindicated in ischemic coronary artery disease because it causes coronary vasoconstriction.",
+                 "contraindication"),
+    PolarityPair("Ethinyl estradiol", "contraception",
+                 "Combined oral contraceptives containing ethinyl estradiol are indicated for the prevention of pregnancy.",
+                 "smokers over 35 years of age",
+                 "Combined oral contraceptives containing ethinyl estradiol are contraindicated in women over 35 years who smoke because of cardiovascular risk.",
+                 "contraindication"),
+    PolarityPair("Heparin", "venous thromboembolism",
+                 "Heparin is indicated for the prophylaxis and treatment of venous thromboembolism.",
+                 "history of heparin-induced thrombocytopenia",
+                 "Heparin is contraindicated in patients with a history of heparin-induced thrombocytopenia.",
+                 "contraindication"),
+    PolarityPair("Ceftriaxone", "community-acquired pneumonia",
+                 "Ceftriaxone is indicated for community-acquired pneumonia and other serious bacterial infections.",
+                 "neonates receiving intravenous calcium",
+                 "Ceftriaxone is contraindicated in neonates receiving calcium-containing intravenous solutions because of fatal precipitates.",
+                 "contraindication"),
+    PolarityPair("Digoxin", "atrial fibrillation rate control",
+                 "Digoxin is indicated for ventricular rate control in chronic atrial fibrillation.",
+                 "ventricular fibrillation",
+                 "Digoxin is contraindicated in ventricular fibrillation.",
+                 "contraindication"),
+    PolarityPair("Hydrochlorothiazide", "hypertension",
+                 "Hydrochlorothiazide is indicated for the management of hypertension and edema.",
+                 "anuria",
+                 "Hydrochlorothiazide is contraindicated in patients with anuria.",
+                 "contraindication"),
+    PolarityPair("Atorvastatin", "hypercholesterolemia",
+                 "Atorvastatin is indicated to reduce LDL cholesterol in primary hypercholesterolemia.",
+                 "acute liver failure or decompensated cirrhosis",
+                 "Atorvastatin is contraindicated in acute liver failure or decompensated cirrhosis.",
+                 "contraindication"),
+)
+
 
 PAIRED_CLINICAL_POLARITY_CASES: List[Dict[str, Any]] = [
     {
-        "pair_id": "POL_01",
-        "entity": "Metformin",
-        "condition": "Type 2 Diabetes Mellitus & Renal Impairment",
+        "pair_id": f"POL_{i+1:02d}",
+        "entity": p.drug,
         "positive": {
-            "query": "Under what clinical guidelines is metformin indicated as first-line monotherapy for glycemic control in adult patients with type 2 diabetes?",
+            "query": f"Under what clinical conditions is {p.drug.lower()} indicated for {p.indication}?",
             "expected_polarity": "indicated",
-            "safety_keywords": ["first-line", "indicated", "glycemic control", "insulin sensitivity"],
+            "safety_keywords": [p.drug.lower(), "indicated", p.indication.lower()],
         },
         "negative": {
-            "query": "Why is metformin strictly contraindicated in patients with acute metabolic acidosis or severe chronic kidney disease with eGFR below 30 mL/min?",
+            "query": f"Why is {p.drug.lower()} contraindicated in patients with {p.opposite}?",
             "expected_polarity": "contraindicated",
-            "safety_keywords": ["lactic acidosis", "contraindicated", "egfr", "renal failure", "avoid"],
+            "safety_keywords": [p.drug.lower(), "contraindicated", p.opposite.lower(), "avoid"],
         },
-    },
-    {
-        "pair_id": "POL_02",
-        "entity": "Beta-Blockers (Metoprolol/Carvedilol)",
-        "condition": "Congestive Heart Failure vs. Decompensated Shock",
-        "positive": {
-            "query": "How do guideline-directed beta-blockers such as metoprolol succinate improve survival in stable patients with chronic reduced ejection fraction heart failure?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["survival benefit", "indicated", "remodeling", "hfref", "stable"],
-        },
-        "negative": {
-            "query": "Why are beta-blockers contraindicated during acute decompensated heart failure with cardiogenic shock or symptomatic bradycardia?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["cardiogenic shock", "contraindicated", "decompensated", "negative inotrope", "avoid"],
-        },
-    },
-    {
-        "pair_id": "POL_03",
-        "entity": "ACE Inhibitors (Lisinopril)",
-        "condition": "Hypertension vs. Bilateral Renal Artery Stenosis & Pregnancy",
-        "positive": {
-            "query": "What are the primary clinical indications for lisinopril in reducing proteinuria and blood pressure in diabetic nephropathy?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["indicated", "proteinuria", "renoprotection", "blood pressure"],
-        },
-        "negative": {
-            "query": "Why are ACE inhibitors absolutely contraindicated in pregnancy and bilateral renal artery stenosis due to acute renal failure risks?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["teratogenic", "fetopathy", "renal artery stenosis", "contraindicated", "acute kidney injury"],
-        },
-    },
-    {
-        "pair_id": "POL_04",
-        "entity": "Aspirin",
-        "condition": "Secondary CAD Prevention vs. Pediatric Viral Illness (Reye Syndrome)",
-        "positive": {
-            "query": "What is the evidence supporting daily low-dose aspirin for secondary prevention of recurrent atherothrombotic myocardial infarction?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["secondary prevention", "indicated", "antiplatelet", "atherothrombosis"],
-        },
-        "negative": {
-            "query": "Why is aspirin strictly contraindicated in children and adolescents recovering from influenza or varicella due to Reye syndrome risks?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["reye syndrome", "contraindicated", "encephalopathy", "hepatic failure", "pediatric"],
-        },
-    },
-    {
-        "pair_id": "POL_05",
-        "entity": "Phosphodiesterase-5 Inhibitors (Sildenafil)",
-        "condition": "Erectile Dysfunction/PAH vs. Concurrent Organic Nitrates",
-        "positive": {
-            "query": "How does sildenafil provide pulmonary vasodilation and functional improvement in patients with World Health Organization Group 1 pulmonary arterial hypertension?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["pulmonary hypertension", "indicated", "vasodilation", "cgmp"],
-        },
-        "negative": {
-            "query": "Why is co-administration of sildenafil with sublingual nitroglycerin or isosorbide mononitrate contraindicated due to refractory hypotension?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["nitroglycerin", "profound hypotension", "contraindicated", "fatal collapse", "never coadminister"],
-        },
-    },
-    {
-        "pair_id": "POL_06",
-        "entity": "Thrombolytics (Alteplase / tPA)",
-        "condition": "Acute Ischemic Stroke vs. Active Hemorrhage or Recent Aortic Dissection",
-        "positive": {
-            "query": "What is the therapeutic window and indication for IV alteplase administration in acute ischemic stroke presenting within 4.5 hours of symptom onset?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["ischemic stroke", "indicated", "reperfusion", "thrombolysis", "4.5 hours"],
-        },
-        "negative": {
-            "query": "What active bleeding disorders, recent intracranial hemorrhages, or suspected aortic dissections are absolute contraindications to intravenous tPA?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["intracranial hemorrhage", "contraindicated", "aortic dissection", "fatal bleeding", "exclusion criteria"],
-        },
-    },
-    {
-        "pair_id": "POL_07",
-        "entity": "Methotrexate",
-        "condition": "Rheumatoid Arthritis vs. Pregnancy & Severe Pre-existing Cirrhosis",
-        "positive": {
-            "query": "Why is weekly low-dose methotrexate recommended as the cornerstone disease-modifying antirheumatic drug (DMARD) for moderate-to-severe rheumatoid arthritis?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["dmard", "indicated", "rheumatoid arthritis", "synovial inflammation"],
-        },
-        "negative": {
-            "query": "Why is methotrexate classified as Category X and absolutely contraindicated during pregnancy and breastfeeding, as well as in severe chronic liver disease?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["teratogen", "category x", "contraindicated", "cirrhosis", "congenital malformation", "abortifacient"],
-        },
-    },
-    {
-        "pair_id": "POL_08",
-        "entity": "Nonsteroidal Anti-inflammatory Drugs (NSAIDs / Ibuprofen)",
-        "condition": "Musculoskeletal Pain vs. Active Peptic Ulcer Disease & Advanced Heart Failure",
-        "positive": {
-            "query": "How do short-course NSAIDs like ibuprofen effectively alleviate acute inflammatory musculoskeletal pain and dysmenorrhea?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["anti-inflammatory", "indicated", "cox inhibition", "analgesic"],
-        },
-        "negative": {
-            "query": "Why are systemically absorbed NSAIDs contraindicated in patients with active gastrointestinal peptic ulceration or severe congestive heart failure?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["peptic ulcer", "gi bleed", "perforation", "contraindicated", "fluid retention", "renal prostaglandin"],
-        },
-    },
-    {
-        "pair_id": "POL_09",
-        "entity": "Statin Therapy (Atorvastatin)",
-        "condition": "Dyslipidemia / ASCVD vs. Acute Active Liver Failure & Unexplained Persisting Transaminitis",
-        "positive": {
-            "query": "What are the cardiovascular event reduction indications for high-intensity atorvastatin in clinical atherosclerotic cardiovascular disease?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["cardiovascular risk", "indicated", "ldl-c reduction", "plaque stabilization"],
-        },
-        "negative": {
-            "query": "Why are HMG-CoA reductase inhibitors contraindicated in active decompensated liver cirrhosis and unexplained persistent hepatic aminotransferase elevations?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["active hepatic failure", "contraindicated", "transaminitis", "hepatotoxicity", "decompensated cirrhosis"],
-        },
-    },
-    {
-        "pair_id": "POL_10",
-        "entity": "Direct Oral Anticoagulants (Rivaroxaban / Apixaban)",
-        "condition": "Non-valvular Atrial Fibrillation vs. Mechanical Prosthetic Heart Valves",
-        "positive": {
-            "query": "What is the clinical evidence supporting apixaban for thromboembolism and stroke prevention in non-valvular atrial fibrillation?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["stroke prevention", "indicated", "atrial fibrillation", "factor xa inhibition"],
-        },
-        "negative": {
-            "query": "Why are direct oral anticoagulants like rivaroxaban contraindicated in patients with mechanical prosthetic heart valves based on clinical trial evidence?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["mechanical prosthetic valve", "contraindicated", "thromboembolism", "valvular thrombosis", "warfarin mandatory"],
-        },
-    },
-    {
-        "pair_id": "POL_11",
-        "entity": "Fluoroquinolones (Ciprofloxacin)",
-        "condition": "Complicated Pyelonephritis vs. Myasthenia Gravis & Aortic Aneurysm Risk",
-        "positive": {
-            "query": "What makes ciprofloxacin an effective antimicrobial agent for complicated urinary tract infections and pyelonephritis caused by susceptible gram-negative organisms?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["pyelonephritis", "indicated", "gram-negative", "dna gyrase", "bactericidal"],
-        },
-        "negative": {
-            "query": "Why does the FDA carry a black box warning stating fluoroquinolones are contraindicated in patients with myasthenia gravis due to exacerbation of muscle weakness?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["myasthenia gravis", "contraindicated", "black box", "neuromuscular blockade", "respiratory failure"],
-        },
-    },
-    {
-        "pair_id": "POL_12",
-        "entity": "SGLT2 Inhibitors (Empagliflozin)",
-        "condition": "Cardiorenal Syndrome / T2DM vs. Euglycemic Diabetic Ketoacidosis & Dialysis",
-        "positive": {
-            "query": "How do SGLT2 inhibitors like empagliflozin reduce cardiovascular death and heart failure hospitalizations in patients with chronic kidney disease and diabetes?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["hf hospitalization", "indicated", "cardioprotection", "nephroprotection"],
-        },
-        "negative": {
-            "query": "Why should SGLT2 inhibitors not be initiated in patients with type 1 diabetes prone to euglycemic DKA or those undergoing dialysis?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["euglycemic dka", "contraindicated", "dialysis", "ketoacidosis", "avoid"],
-        },
-    },
-    {
-        "pair_id": "POL_13",
-        "entity": "Opioids (Morphine)",
-        "condition": "Severe Acute Trauma Pain vs. Severe Respiratory Depression & Coma",
-        "positive": {
-            "query": "What are the clinical protocols for intravenous morphine titration in managing severe acute post-operative or traumatic nociceptive pain?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["analgesia", "indicated", "acute pain", "mu-opioid receptor"],
-        },
-        "negative": {
-            "query": "Why are full opioid agonists contraindicated in patients experiencing acute respiratory depression, acute bronchial asthma, or paralytic ileus?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["respiratory depression", "contraindicated", "paralytic ileus", "hypercapnia", "apnea"],
-        },
-    },
-    {
-        "pair_id": "POL_14",
-        "entity": "Warfarin",
-        "condition": "Venous Thromboembolism vs. Severe Uncontrolled Malignant Hypertension & Pregnancy",
-        "positive": {
-            "query": "What is the therapeutic target INR and indication for warfarin anticoagulation in deep vein thrombosis and pulmonary embolism treatment?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["anticoagulation", "indicated", "inr target", "dvt", "pulmonary embolism"],
-        },
-        "negative": {
-            "query": "Why is warfarin strictly contraindicated in pregnant patients during the first trimester due to warfarin embryopathy and nasal hypoplasia?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["warfarin embryopathy", "teratogenic", "contraindicated", "chondrodysplasia", "first trimester"],
-        },
-    },
-    {
-        "pair_id": "POL_15",
-        "entity": "Bupropion",
-        "condition": "Major Depressive Disorder & Smoking Cessation vs. Anorexia / Bulimia & Seizure Disorders",
-        "positive": {
-            "query": "How does bupropion's norepinephrine-dopamine reuptake inhibition provide efficacy in major depressive disorder without sexual side effects?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["antidepressant", "indicated", "ndri", "smoking cessation"],
-        },
-        "negative": {
-            "query": "Why is bupropion absolutely contraindicated in patients with a history of seizure disorders, bulimia nervosa, or anorexia nervosa?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["seizure threshold", "contraindicated", "bulimia", "anorexia", "convulsions"],
-        },
-    },
-    {
-        "pair_id": "POL_16",
-        "entity": "Non-Dihydropyridine Calcium Channel Blockers (Diltiazem/Verapamil)",
-        "condition": "Atrial Fibrillation Rate Control vs. Second/Third-Degree Heart Block & Severe HFrEF",
-        "positive": {
-            "query": "What is the clinical rationale for using diltiazem for ventricular rate deceleration in rapid atrial fibrillation with preserved ejection fraction?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["rate control", "indicated", "av nodal slowing", "preserved ejection fraction"],
-        },
-        "negative": {
-            "query": "Why are verapamil and diltiazem contraindicated in patients with second- or third-degree AV block without a pacemaker or severe systolic heart failure?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["av block", "contraindicated", "systolic dysfunction", "asystole", "negative inotrope"],
-        },
-    },
-    {
-        "pair_id": "POL_17",
-        "entity": "Live Attenuated Vaccines (MMR, Varicella)",
-        "condition": "Childhood Immunization vs. Severe Immunocompromise & Biologic Therapy",
-        "positive": {
-            "query": "What is the recommended immunization schedule and indication for MMR vaccination in healthy pediatric populations?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["vaccination", "indicated", "immunization", "measles", "pediatric"],
-        },
-        "negative": {
-            "query": "Why are live attenuated vaccines contraindicated in patients receiving high-dose immunosuppressive biological agents or with severe primary immunodeficiencies?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["immunocompromised", "contraindicated", "disseminated infection", "live vaccine", "opportunistic vaccine-strain disease"],
-        },
-    },
-    {
-        "pair_id": "POL_18",
-        "entity": "Potassium-Sparing Diuretics (Spironolactone)",
-        "condition": "Resistant Hypertension & Heart Failure vs. Severe Hyperkalemia (>5.5 mEq/L)",
-        "positive": {
-            "query": "How does mineralocorticoid receptor antagonism with spironolactone mitigate myocardial fibrosis in Class III-IV heart failure?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["aldosterone antagonist", "indicated", "survival", "anti-fibrotic"],
-        },
-        "negative": {
-            "query": "Why is spironolactone contraindicated in patients with baseline serum potassium exceeding 5.5 mEq/L or severe acute anuric renal failure?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["hyperkalemia", "contraindicated", "arrhythmia", "anuria", "fatal cardiac arrest"],
-        },
-    },
-    {
-        "pair_id": "POL_19",
-        "entity": "Tetracyclines (Doxycycline)",
-        "condition": "Lyme Disease & Atypical Pneumonia vs. Pregnancy & Children Under 8 Years",
-        "positive": {
-            "query": "What is the clinical dosage and indication for oral doxycycline in early localized Lyme disease with erythema migrans?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["lyme disease", "indicated", "borrelia", "erythema migrans"],
-        },
-        "negative": {
-            "query": "Why have tetracyclines been historically contraindicated in children under 8 years and pregnant mothers due to dental and bone impacts?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["permanent tooth discoloration", "enamel hypoplasia", "contraindicated", "bone growth inhibition"],
-        },
-    },
-    {
-        "pair_id": "POL_20",
-        "entity": "Anti-TNF Biologics (Infliximab / Adalimumab)",
-        "condition": "Severe Crohn's Disease vs. Active Untreated Tuberculosis or Severe Class IV Heart Failure",
-        "positive": {
-            "query": "What is the therapeutic indication for adalimumab in inducing mucosal healing and remission in moderate-to-severe Crohn's disease?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["crohn's disease", "indicated", "anti-tnf", "mucosal healing"],
-        },
-        "negative": {
-            "query": "Why are TNF-alpha inhibitors contraindicated in patients with active, untreated Mycobacterium tuberculosis infection or NYHA Class IV heart failure?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["active tuberculosis", "contraindicated", "reactivation tb", "disseminated granuloma breakdown", "fatal worsening"],
-        },
-    },
-    {
-        "pair_id": "POL_21",
-        "entity": "Triptans (Sumatriptan)",
-        "condition": "Acute Migraine with Aura vs. Ischemic Coronary Artery Disease & Prinzmetal Angina",
-        "positive": {
-            "query": "What is the recommended timing and indication for sumatriptan 5-HT1B/1D receptor agonist therapy at the onset of an acute migraine attack?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["acute migraine", "indicated", "5-ht1b/1d", "vasoconstriction"],
-        },
-        "negative": {
-            "query": "Why is sumatriptan absolutely contraindicated in patients with established coronary artery disease, history of myocardial infarction, or Prinzmetal vasospastic angina?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["coronary vasospasm", "contraindicated", "myocardial infarction", "ischemia", "angina"],
-        },
-    },
-    {
-        "pair_id": "POL_22",
-        "entity": "Clozapine",
-        "condition": "Treatment-Resistant Schizophrenia vs. Severe Pre-existing Neutropenia / Agranulocytosis",
-        "positive": {
-            "query": "Under what clinical criteria is clozapine indicated for patients with treatment-resistant schizophrenia failing two previous antipsychotic trials?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["treatment-resistant schizophrenia", "indicated", "atypical antipsychotic", "suicidality reduction"],
-        },
-        "negative": {
-            "query": "Why is clozapine initiation strictly contraindicated in individuals with absolute neutrophil count below 1000/mcL or a history of toxic agranulocytosis?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["agranulocytosis", "contraindicated", "absolute neutrophil count", "anc", "fatal neutropenia"],
-        },
-    },
-    {
-        "pair_id": "POL_23",
-        "entity": "Lithium Carbonate",
-        "condition": "Bipolar I Disorder Mania Maintenance vs. Severe Renal Disease & Brugada Syndrome",
-        "positive": {
-            "query": "What is the evidence supporting lithium maintenance therapy in preventing manic relapse and reducing suicide risk in Bipolar I disorder?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["bipolar disorder", "indicated", "mood stabilizer", "relapse prevention", "anti-suicidal"],
-        },
-        "negative": {
-            "query": "Why is lithium carbonate therapy contraindicated in severe renal impairment and unmasked Brugada syndrome due to life-threatening toxicity?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["renal failure", "lithium toxicity", "contraindicated", "brugada", "narrow therapeutic index"],
-        },
-    },
-    {
-        "pair_id": "POL_24",
-        "entity": "Digoxin",
-        "condition": "Rate Control in Heart Failure with Atrial Fibrillation vs. Ventricular Fibrillation & WPW Syndrome",
-        "positive": {
-            "query": "How does digitalis glycoside positive inotropy and vagal tone enhancement reduce hospitalizations in patients with HFrEF and atrial fibrillation?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["inotropic", "indicated", "hospitalization reduction", "atrial fibrillation", "na/k-atpase"],
-        },
-        "negative": {
-            "query": "Why is digoxin contraindicated in patients with Wolff-Parkinson-White syndrome and atrial fibrillation or ventricular fibrillation?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["wolff-parkinson-white", "wpw", "accessory pathway", "contraindicated", "ventricular fibrillation", "fatal conduction"],
-        },
-    },
-    {
-        "pair_id": "POL_25",
-        "entity": "Amiodarone",
-        "condition": "Life-Threatening Ventricular Arrhythmias vs. Severe Sinus-Node Dysfunction & Cardiogenic Shock",
-        "positive": {
-            "query": "What is the indication for IV amiodarone in hemodynamically unstable ventricular tachycardia or pulseless ventricular fibrillation arrest algorithms?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["ventricular tachycardia", "indicated", "antiarrhythmic", "cardiac arrest", "class iii"],
-        },
-        "negative": {
-            "query": "Why is amiodarone contraindicated in patients with second- or third-degree atrioventricular block or severe sinus bradycardia without a functioning pacemaker?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["sinus node dysfunction", "contraindicated", "av block", "cardiogenic shock", "asystole"],
-        },
-    },
-    {
-        "pair_id": "POL_26",
-        "entity": "Haloperidol",
-        "condition": "Acute Delirium / Psychotic Agitation vs. Parkinson's Disease & Lewy Body Dementia",
-        "positive": {
-            "query": "What are the indications and dosing guidelines for parenteral haloperidol in emergency management of severe psychotic delirium and acute agitation?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["delirium", "indicated", "antipsychotic", "d2 receptor", "acute agitation"],
-        },
-        "negative": {
-            "query": "Why is haloperidol strictly contraindicated in patients with Parkinson's disease or dementia with Lewy bodies due to profound neuroleptic sensitivity?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["parkinson's disease", "lewy body dementia", "contraindicated", "extrapyramidal rigidity", "fatal collapse"],
-        },
-    },
-    {
-        "pair_id": "POL_27",
-        "entity": "Clopidogrel",
-        "condition": "Acute Coronary Syndromes & Stent Placement vs. Active Pathological Bleeding / Hemorrhagic Stroke",
-        "positive": {
-            "query": "What is the rationale for dual antiplatelet therapy with clopidogrel and aspirin following coronary stent implantation for acute coronary syndrome?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["stent thrombosis", "indicated", "dapt", "p2y12 inhibitor", "coronary syndrome"],
-        },
-        "negative": {
-            "query": "Why is clopidogrel therapy contraindicated in patients with active pathological bleeding such as intracranial hemorrhage or active bleeding peptic ulcers?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["active bleeding", "contraindicated", "intracranial hemorrhage", "fatal hemorrhage", "hemostatic failure"],
-        },
-    },
-    {
-        "pair_id": "POL_28",
-        "entity": "Isotretinoin",
-        "condition": "Severe Recalcitrant Nodular Acne vs. Pregnancy (iPLEDGE Protocol)",
-        "positive": {
-            "query": "What makes oral isotretinoin the most definitive curative therapeutic option for severe recalcitrant scarring cystic and nodular acne?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["cystic acne", "indicated", "sebaceous atrophy", "retinoid"],
-        },
-        "negative": {
-            "query": "Why is isotretinoin governed by strict REMS iPLEDGE registries and absolutely contraindicated in pregnancy due to severe craniofacial embryopathy?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["teratogen", "contraindicated", "craniofacial defects", "pregnancy", "ipledge", "congenital malformation"],
-        },
-    },
-    {
-        "pair_id": "POL_29",
-        "entity": "Gentamicin (Aminoglycosides)",
-        "condition": "Serious Aerobic Gram-Negative Bacteremia vs. Myasthenia Gravis & Pre-existing Ototoxicity",
-        "positive": {
-            "query": "What is the clinical role of once-daily consolidated gentamicin dosing in synergy with beta-lactams for enterococcal endocarditis or pseudomonal sepsis?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["bactericidal", "indicated", "synergy", "gram-negative bacteremia", "concentration-dependent"],
-        },
-        "negative": {
-            "query": "Why are aminoglycosides like gentamicin contraindicated in patients with myasthenia gravis due to potent inhibition of presynaptic acetylcholine release?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["myasthenia gravis", "contraindicated", "neuromuscular blockade", "respiratory arrest", "acetylcholine"],
-        },
-    },
-    {
-        "pair_id": "POL_30",
-        "entity": "Oral Potassium Supplements (Potassium Chloride)",
-        "condition": "Diuretic-Induced Hypokalemia vs. Baseline Hyperkalemia & Advanced Anuria",
-        "positive": {
-            "query": "How is oral potassium chloride indicated and dosed to correct serum hypokalemia induced by loop or thiazide diuretic therapy?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["hypokalemia", "indicated", "potassium repletion", "diuretic-induced"],
-        },
-        "negative": {
-            "query": "Why are potassium supplements strictly contraindicated in patients with persistent hyperkalemia, severe chronic kidney disease, or Addison's disease?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["hyperkalemia", "contraindicated", "cardiac conduction block", "ventricular standstill", "addison disease"],
-        },
-    },
-    {
-        "pair_id": "POL_31",
-        "entity": "Valproic Acid / Divalproex Sodium",
-        "condition": "Generalized Tonic-Clonic Seizures vs. Mitochondrial Disorders (POLG) & Pregnancy",
-        "positive": {
-            "query": "What is the clinical spectrum and indication for valproic acid in broad-spectrum control of idiopathic generalized epilepsies and juvenile myoclonic epilepsy?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["generalized epilepsy", "indicated", "antiepileptic", "broad spectrum", "gaba transaminase"],
-        },
-        "negative": {
-            "query": "Why is valproate absolutely contraindicated in patients with known urea cycle disorders, POLG-related mitochondrial disease, and during pregnancy?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["polg mutation", "hepatic failure", "contraindicated", "neural tube defects", "hyperammonemic encephalopathy", "spina bifida"],
-        },
-    },
-    {
-        "pair_id": "POL_32",
-        "entity": "Combined Oral Contraceptives (Estrogen-Progestin)",
-        "condition": "Fertility Control & Polycystic Ovary Syndrome vs. Migraine with Aura & Women Over 35 Who Smoke",
-        "positive": {
-            "query": "What is the therapeutic mechanism and indication for combined oral contraceptives in ovulation suppression and cycle regulation in PCOS?",
-            "expected_polarity": "indicated",
-            "safety_keywords": ["contraception", "indicated", "ovulation suppression", "pcos", "anti-androgenic"],
-        },
-        "negative": {
-            "query": "Why are estrogen-containing oral contraceptives contraindicated in women over age 35 who smoke heavily or patients experiencing migraine with aura?",
-            "expected_polarity": "contraindicated",
-            "safety_keywords": ["ischemic stroke", "venous thromboembolism", "contraindicated", "migraine with aura", "smokers over 35", "hypercoagulability"],
-        },
-    },
+    }
+    for i, p in enumerate(PAIRS)
 ]
 
 
-
 class PolarityBenchmark:
-    """Benchmark runner evaluating RAG systems on clinical polarity discrimination."""
-
-    def __init__(
-        self,
-        output_path: Optional[Path] = None,
-        test_cases: Optional[List[Dict[str, Any]]] = None,
-    ):
-        self.output_path = Path(output_path or (RESULTS_DIR / "polarity_benchmark_results.json"))
-        self.test_cases = test_cases or PAIRED_CLINICAL_POLARITY_CASES
-        self.systems: Dict[str, Any] = {}
-
-    def _init_systems(self):
-        """Lazy initialization of all benchmark arms."""
-        from src.baselines.baseline_llm import BaselineLLM
-        from src.baselines.bm25_rag import BM25RAG, HybridRAG
-        from src.baselines.vanilla_vector_rag import VanillaVectorRAG
-        from src.core.hcad_retriever import HCADRetriever
-
-        logger.info("Initializing 5 baseline and proposed RAG systems for polarity benchmark...")
-        self.systems = {
-            BASELINE_SYSTEM_NAME: BaselineLLM(),
-            BM25_SYSTEM_NAME: BM25RAG(),
-            VANILLA_SYSTEM_NAME: VanillaVectorRAG(),
-            HYBRID_SYSTEM_NAME: HybridRAG(),
-            HCAD_SYSTEM_NAME: HCADRetriever(fail_on_vector_error=False),
-        }
-
-    @staticmethod
-    def _check_safety_recall(contexts: List[Dict[str, Any]], expected_keywords: List[str]) -> float:
-        """Measure if retrieved contexts contain key safety / contraindication keywords."""
-        if not contexts or not expected_keywords:
-            return 0.0
-
-        all_text = " ".join([
-            str(c.get("document", "")) + " " + str(c.get("metadata", {}))
-            for c in contexts
-        ]).lower()
-
-        hits = sum(1 for kw in expected_keywords if kw.lower() in all_text)
-        return hits / len(expected_keywords)
+    """Benchmark runner / classifier evaluating RAG systems on clinical polarity discrimination."""
 
     @staticmethod
     def _evaluate_polarity_fidelity(
@@ -579,15 +296,7 @@ class PolarityBenchmark:
         expected_polarity: str,
         safety_keywords: List[str],
     ) -> Dict[str, Any]:
-        """Classify whether the generated answer adhered to the intended polarity.
-
-        For contraindicated queries:
-        - Must mention contraindication / avoid / caution / risk.
-        - Must NOT say 'safe and indicated' or endorse the therapy without strong warning.
-        """
-        ans_lower = answer.lower()
-
-        # Warning terms that signal contraindication awareness
+        ans_lower = (answer or "").lower()
         warning_terms = [
             "contraindicated", "avoid", "caution", "danger", "harm", "toxic",
             "adverse", "black box", "not recommended", "should not", "risk",
@@ -597,11 +306,9 @@ class PolarityBenchmark:
         has_safety_keywords = any(kw.lower() in ans_lower for kw in safety_keywords)
 
         if expected_polarity == "contraindicated":
-            # An inversion error occurs if the answer has NO warning and endorses usage
             is_inverted_error = (not has_warning) and ("indicated" in ans_lower or "recommended" in ans_lower)
             correct_polarity = has_warning and not is_inverted_error
         else:
-            # For indicated queries, answer should describe positive indication
             is_inverted_error = False
             correct_polarity = "indicated" in ans_lower or "effective" in ans_lower or "benefit" in ans_lower or has_safety_keywords
 
@@ -609,165 +316,430 @@ class PolarityBenchmark:
             "correct_polarity": bool(correct_polarity),
             "inversion_error": bool(is_inverted_error),
             "has_warning_language": bool(has_warning),
-            "safety_keyword_coverage": sum(1 for kw in safety_keywords if kw.lower() in ans_lower) / max(1, len(safety_keywords)),
+            "safety_keyword_coverage": (
+                sum(1 for kw in safety_keywords if kw.lower() in ans_lower) / max(1, len(safety_keywords))
+            ),
         }
+
+    @staticmethod
+    def _check_safety_recall(contexts: List[Dict[str, Any]], expected_keywords: List[str]) -> float:
+        if not contexts or not expected_keywords:
+            return 0.0
+        all_text = " ".join([
+            str(c.get("document", "")) + " " + str(c.get("metadata", ""))
+            for c in contexts
+        ]).lower()
+        hits = sum(1 for kw in expected_keywords if kw.lower() in all_text)
+        return hits / len(expected_keywords)
 
     def run_benchmark(self, num_pairs: Optional[int] = None) -> Dict[str, Any]:
-        """Execute the paired polarity evaluation across all systems."""
-        self._init_systems()
-        pairs_to_run = self.test_cases[:num_pairs] if num_pairs else self.test_cases
-        logger.info("Starting Polarity Discrimination Benchmark across %d pairs (%d queries)...", len(pairs_to_run), len(pairs_to_run) * 2)
+        return run_polarity_benchmark()
 
-        results_by_system: Dict[str, Dict[str, Any]] = {
-            sys_name: {
-                "positive_fidelity": [],
-                "negative_fidelity": [],
-                "contraindication_recall_at_k": [],
-                "inversion_error_count": 0,
-                "total_negative_queries": 0,
-                "latencies_retrieval": [],
-                "latencies_generation": [],
-            }
-            for sys_name in self.systems
-        }
+QUERY_TEMPLATES = {
+    ("indication", "lexical"): "What is {drug} indicated for?",
+    ("indication", "paraphrase"): "Which condition is {drug} used to treat?",
+    ("contraindication", "lexical"): "In which condition is {drug} contraindicated?",
+    ("contraindication", "paraphrase"): "In which patients must {drug} never be given?",
+    ("caution", "lexical"): "In which patients should {drug} be used with caution or avoided?",
+    ("caution", "paraphrase"): "Which patients face a special danger when given {drug}?",
+}
 
-        detailed_per_pair = []
+PHRASINGS = ("lexical", "paraphrase")
 
-        for p_idx, pair in enumerate(pairs_to_run, 1):
-            pair_id = pair["pair_id"]
-            entity = pair["entity"]
-            pos_case = pair["positive"]
-            neg_case = pair["negative"]
-            logger.info("Evaluating Pair %d/%d [%s - %s]...", p_idx, len(pairs_to_run), pair_id, entity)
 
-            pair_record: Dict[str, Any] = {
-                "pair_id": pair_id,
-                "entity": entity,
-                "condition": pair["condition"],
-                "positive_query": pos_case["query"],
-                "negative_query": neg_case["query"],
-                "systems": {},
-            }
+def build_corpus(pairs: Sequence[PolarityPair] = PAIRS) -> List[Dict]:
+    """Two statements per drug; ids encode drug index and polarity."""
+    corpus = []
+    for i, p in enumerate(pairs):
+        corpus.append({"id": f"p{i:02d}_ind", "pair": i, "polarity": "indication",
+                       "text": p.indication_evidence,
+                       "metadata": {"head_name": p.drug, "relation": "indication",
+                                    "tail_name": p.indication}})
+        corpus.append({"id": f"p{i:02d}_opp", "pair": i, "polarity": "opposite",
+                       "text": p.opposite_evidence,
+                       "metadata": {"head_name": p.drug, "relation": "contraindication",
+                                    "tail_name": p.opposite}})
+    return corpus
 
-            for sys_name, system in self.systems.items():
-                sys_data: Dict[str, Any] = {}
 
-                # 1. Run Positive Query
-                t0 = time.perf_counter()
-                if hasattr(system, "retrieve"):
-                    pos_contexts = system.retrieve(pos_case["query"])
-                    t_pos_ret = time.perf_counter() - t0
-                else:
-                    pos_contexts = []
-                    t_pos_ret = 0.0
+def build_queries(pairs: Sequence[PolarityPair] = PAIRS) -> List[Dict]:
+    queries = []
+    for i, p in enumerate(pairs):
+        for phrasing in PHRASINGS:
+            queries.append({
+                "qid": f"p{i:02d}_ind_{phrasing}", "pair": i, "drug": p.drug,
+                "target": "indication", "phrasing": phrasing,
+                "polarity_type": "indication",
+                "query": QUERY_TEMPLATES[("indication", phrasing)].format(drug=p.drug),
+                "gold_id": f"p{i:02d}_ind", "opposite_id": f"p{i:02d}_opp",
+            })
+            queries.append({
+                "qid": f"p{i:02d}_opp_{phrasing}", "pair": i, "drug": p.drug,
+                "target": "opposite", "phrasing": phrasing,
+                "polarity_type": p.polarity_type,
+                "query": QUERY_TEMPLATES[(p.polarity_type, phrasing)].format(drug=p.drug),
+                "gold_id": f"p{i:02d}_opp", "opposite_id": f"p{i:02d}_ind",
+            })
+    return queries
 
-                t0 = time.perf_counter()
-                if hasattr(system, "retrieve_and_generate"):
-                    pos_ans = system.retrieve_and_generate(pos_case["query"], contexts=pos_contexts)
-                else:
-                    pos_ans = system.generate(pos_case["query"])
-                t_pos_gen = time.perf_counter() - t0
 
-                pos_eval = self._evaluate_polarity_fidelity(
-                    pos_ans, "indicated", pos_case["safety_keywords"]
-                )
+# ---------------------------------------------------------------------------
+# Rankers: fn(query: str) -> list of corpus ids, best first (full ranking)
+# ---------------------------------------------------------------------------
 
-                # 2. Run Negative (Contraindicated) Query
-                t0 = time.perf_counter()
-                if hasattr(system, "retrieve"):
-                    neg_contexts = system.retrieve(neg_case["query"])
-                    t_neg_ret = time.perf_counter() - t0
-                else:
-                    neg_contexts = []
-                    t_neg_ret = 0.0
+Ranker = Callable[[str], List[str]]
 
-                t0 = time.perf_counter()
-                if hasattr(system, "retrieve_and_generate"):
-                    neg_ans = system.retrieve_and_generate(neg_case["query"], contexts=neg_contexts)
-                else:
-                    neg_ans = system.generate(neg_case["query"])
-                t_neg_gen = time.perf_counter() - t0
 
-                neg_eval = self._evaluate_polarity_fidelity(
-                    neg_ans, "contraindicated", neg_case["safety_keywords"]
-                )
+def _rank_from_scores(corpus: Sequence[Dict], scores: np.ndarray) -> List[str]:
+    order = sorted(range(len(corpus)), key=lambda i: (-float(scores[i]), i))
+    return [corpus[i]["id"] for i in order]
 
-                # Contraindication recall on retrieved evidence
-                neg_recall = self._check_safety_recall(neg_contexts, neg_case["safety_keywords"])
 
-                # Record metrics
-                rec = results_by_system[sys_name]
-                rec["positive_fidelity"].append(1.0 if pos_eval["correct_polarity"] else 0.0)
-                rec["negative_fidelity"].append(1.0 if neg_eval["correct_polarity"] else 0.0)
-                rec["contraindication_recall_at_k"].append(neg_recall)
-                if neg_eval["inversion_error"]:
-                    rec["inversion_error_count"] += 1
-                rec["total_negative_queries"] += 1
-                rec["latencies_retrieval"].extend([t_pos_ret, t_neg_ret])
-                rec["latencies_generation"].extend([t_pos_gen, t_neg_gen])
+def make_bm25_ranker(corpus: Sequence[Dict]) -> Ranker:
+    from src.baselines.sparse_retrievers import BM25Index
 
-                sys_data["positive"] = {
-                    "answer_snippet": pos_ans[:180],
-                    "evaluation": pos_eval,
-                    "retrieval_latency": round(t_pos_ret, 3),
-                    "generation_latency": round(t_pos_gen, 3),
-                }
-                sys_data["negative"] = {
-                    "answer_snippet": neg_ans[:180],
-                    "evaluation": neg_eval,
-                    "safety_recall_at_k": round(neg_recall, 3),
-                    "retrieval_latency": round(t_neg_ret, 3),
-                    "generation_latency": round(t_neg_gen, 3),
-                }
-                pair_record["systems"][sys_name] = sys_data
+    index = BM25Index([d["text"] for d in corpus], [d["id"] for d in corpus])
+    return lambda q: _rank_from_scores(corpus, index.scores(q))
 
-            detailed_per_pair.append(pair_record)
 
-        # Compute Summary Statistics
-        summary: Dict[str, Any] = {}
-        for sys_name, data in results_by_system.items():
-            n_neg = max(1, data["total_negative_queries"])
-            pos_acc = float(np.mean(data["positive_fidelity"])) * 100.0 if data["positive_fidelity"] else 0.0
-            neg_acc = float(np.mean(data["negative_fidelity"])) * 100.0 if data["negative_fidelity"] else 0.0
-            overall_polarity_acc = (pos_acc + neg_acc) / 2.0
-            inversion_rate = (data["inversion_error_count"] / n_neg) * 100.0
-            mean_safety_recall = float(np.mean(data["contraindication_recall_at_k"])) * 100.0 if data["contraindication_recall_at_k"] else 0.0
-            mean_ret_lat = float(np.mean(data["latencies_retrieval"])) if data["latencies_retrieval"] else 0.0
-            mean_gen_lat = float(np.mean(data["latencies_generation"])) if data["latencies_generation"] else 0.0
+def make_dense_ranker(corpus: Sequence[Dict],
+                      encode: Callable[[List[str]], np.ndarray]) -> Ranker:
+    """Cosine ranking with an L2-normalising encoder (S-PubMedBERT by default)."""
+    doc_vecs = np.asarray(encode([d["text"] for d in corpus]), dtype=np.float32)
 
-            summary[sys_name] = {
-                "indication_fidelity_pct": round(pos_acc, 2),
-                "contraindication_fidelity_pct": round(neg_acc, 2),
-                "overall_polarity_accuracy_pct": round(overall_polarity_acc, 2),
-                "contraindication_recall_at_k_pct": round(mean_safety_recall, 2),
-                "polarity_inversion_error_rate_pct": round(inversion_rate, 2),
-                "mean_retrieval_latency_s": round(mean_ret_lat, 3),
-                "mean_generation_latency_s": round(mean_gen_lat, 3),
-                "mean_total_latency_s": round(mean_ret_lat + mean_gen_lat, 3),
-            }
+    def rank(q: str) -> List[str]:
+        qv = np.asarray(encode([q]), dtype=np.float32)[0]
+        return _rank_from_scores(corpus, doc_vecs @ qv)
+    return rank
 
-        benchmark_results = {
-            "benchmark_manifest": {
-                "benchmark_name": "HCAD-RAG Polarity Discrimination Benchmark",
-                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                "num_pairs": len(pairs_to_run),
-                "num_queries": len(pairs_to_run) * 2,
+
+def make_hybrid_ranker(bm25: Ranker, dense: Ranker, k: int = 60) -> Ranker:
+    """Reciprocal-rank fusion of two full rankings."""
+    def rank(q: str) -> List[str]:
+        fused: Dict[str, float] = {}
+        for ranking in (bm25(q), dense(q)):
+            for r, doc_id in enumerate(ranking, 1):
+                fused[doc_id] = fused.get(doc_id, 0.0) + 1.0 / (k + r)
+        return sorted(fused, key=lambda d: (-fused[d], d))
+    return rank
+
+
+def make_hcad_ranker(corpus: Sequence[Dict], retriever=None,
+                     with_kg_metadata: bool = False) -> Ranker:
+    """HCAD-RAG ranking of the curated corpus (stages 1, 3, 4).
+
+    The corpus is injected as the candidate pool and the PRE-GATE hybrid
+    Phi scores recorded by ``HCADRetriever.retrieve`` rank every
+    statement, so polarity errors are measured over the full ranking
+    rather than only over items that survive the filter.
+    """
+    if retriever is None:
+        import networkx as nx
+        from src.core.hcad_retriever import HCADRetriever
+
+        # Empty graph: no PrimeKG needed for the controlled corpus mode.
+        retriever = HCADRetriever(graph=nx.Graph(), collection=None)
+
+    def candidates() -> List[Dict]:
+        out = []
+        for d in corpus:
+            meta = dict(d["metadata"]) if with_kg_metadata else {}
+            out.append({"id": d["id"], "document": d["text"], "metadata": meta,
+                        "source": "polarity_corpus"})
+        return out
+
+    def rank(q: str) -> List[str]:
+        import os
+
+        original = retriever._get_candidate_contexts
+        retriever._get_candidate_contexts = lambda *a, **kw: candidates()
+        # The ranking uses PRE-gate scores, so the decision gate (a live
+        # TypeSafe API call when TYPESAFE_API_KEY is set) is skipped here.
+        previous_gate = os.environ.get("HCAD_DECISION_GATE")
+        os.environ["HCAD_DECISION_GATE"] = "0"
+        try:
+            retriever.retrieve(q)
+        finally:
+            retriever._get_candidate_contexts = original
+            if previous_gate is None:
+                os.environ.pop("HCAD_DECISION_GATE", None)
+            else:
+                os.environ["HCAD_DECISION_GATE"] = previous_gate
+        pool = retriever._last_candidate_pool or []
+        phi = retriever._last_phi_scores
+        if not pool or phi is None:
+            raise RuntimeError("HCAD retriever produced no candidate scores")
+        scores = np.asarray(phi, dtype=np.float32)
+        order = sorted(range(len(pool)), key=lambda i: (-float(scores[i]), i))
+        return [pool[i]["id"] for i in order]
+    return rank
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+def score_query(ranking: Sequence[str], gold_id: str, opposite_id: str, k: int) -> Dict:
+    """Per-query polarity metrics from a ranking (ids best-first)."""
+    pos = {doc_id: r for r, doc_id in enumerate(ranking, 1)}
+    inf = len(ranking) + 1
+    r_gold = pos.get(gold_id, inf)
+    r_opp = pos.get(opposite_id, inf)
+    return {
+        "rank_gold": r_gold if r_gold != inf else None,
+        "rank_opposite": r_opp if r_opp != inf else None,
+        "recall_at_k": int(r_gold <= k),
+        # opposite-polarity twin ranked above the requested polarity
+        "polarity_error": int(r_opp < r_gold),
+        "opposite_in_top_k": int(r_opp <= k),
+        "reciprocal_rank": (1.0 / r_gold) if r_gold != inf else 0.0,
+    }
+
+
+def _summary(rows: Sequence[Dict]) -> Dict:
+    def ci(key):
+        return bootstrap_ci([r[key] for r in rows])
+    return {
+        "n_queries": len(rows),
+        "polarity_recall_at_k": ci("recall_at_k"),
+        "polarity_error_rate": ci("polarity_error"),
+        "opposite_in_top_k_rate": ci("opposite_in_top_k"),
+        "mrr": ci("reciprocal_rank"),
+    }
+
+
+def _pair_accuracy(rows: Sequence[Dict]) -> Dict:
+    by_key: Dict[tuple, List[int]] = {}
+    for r in rows:
+        by_key.setdefault((r["pair"], r["phrasing"]), []).append(r["polarity_error"])
+    flags = [int(len(v) == 2 and sum(v) == 0) for v in by_key.values()]
+    return bootstrap_ci(flags)
+
+
+def evaluate_rankers(rankers: Dict[str, Ranker], queries: Sequence[Dict],
+                     k: int = POLARITY_TOP_K, reference_arm: str = "hcad") -> Dict:
+    per_query: Dict[str, List[Dict]] = {}
+    timing: Dict[str, float] = {}
+    for arm, ranker in rankers.items():
+        rows = []
+        t0 = time.perf_counter()
+        for q in queries:
+            ranking = ranker(q["query"])
+            rows.append({**q, **score_query(ranking, q["gold_id"], q["opposite_id"], k),
+                         "top_k": list(ranking[:k])})
+        timing[arm] = (time.perf_counter() - t0) / max(1, len(queries))
+        per_query[arm] = rows
+        logger.info("Polarity arm %-10s error=%.3f recall@%d=%.3f", arm,
+                    np.mean([r["polarity_error"] for r in rows]), k,
+                    np.mean([r["recall_at_k"] for r in rows]))
+
+    arms = {}
+    for arm, rows in per_query.items():
+        arms[arm] = {
+            "overall": _summary(rows),
+            "pair_accuracy": _pair_accuracy(rows),
+            "by_target_polarity": {
+                t: _summary([r for r in rows if r["target"] == t])
+                for t in ("indication", "opposite")
             },
-            "summary_metrics": summary,
-            "detailed_per_pair": detailed_per_pair,
+            "by_phrasing": {
+                ph: _summary([r for r in rows if r["phrasing"] == ph]) for ph in PHRASINGS
+            },
+            "mean_seconds_per_query": timing[arm],
         }
 
-        self.output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.output_path, "w", encoding="utf-8") as f:
-            json.dump(benchmark_results, f, indent=2)
+    significance = {}
+    if reference_arm in per_query:
+        ref_ok = [not r["polarity_error"] for r in per_query[reference_arm]]
+        for arm, rows in per_query.items():
+            if arm == reference_arm:
+                continue
+            significance[f"{reference_arm}_vs_{arm}"] = mcnemar_exact(
+                ref_ok, [not r["polarity_error"] for r in rows])
+    return {"arms": arms, "significance_mcnemar_polarity_error": significance,
+            "per_query": per_query}
 
-        logger.info("Polarity benchmark successfully saved to %s", self.output_path)
-        return benchmark_results
+
+# ---------------------------------------------------------------------------
+# Store mode: full pipeline over the built vector store / PrimeKG
+# ---------------------------------------------------------------------------
+
+_INDICATION_RELATIONS = {"indication", "off-label use"}
+_OPPOSITE_RELATIONS = {"contraindication"}
+
+
+def context_polarity(ctx: Dict, drug: str) -> Optional[str]:
+    """'indication' / 'opposite' / None for a retrieved store context."""
+    meta = ctx.get("metadata") or {}
+    rel = str(meta.get("relation") or "").lower()
+    head = str(meta.get("head_name") or "").lower()
+    tail = str(meta.get("tail_name") or "").lower()
+    if drug.lower() not in (head, tail):
+        return None
+    if rel in _INDICATION_RELATIONS:
+        return "indication"
+    if rel in _OPPOSITE_RELATIONS:
+        return "opposite"
+    return None
+
+
+def evaluate_store_retrievers(retrievers: Dict[str, Callable[[str], List[Dict]]],
+                              queries: Sequence[Dict], k: int = POLARITY_TOP_K) -> Dict:
+    """Polarity metrics when arms retrieve from the real store (top-k only).
+
+    Gold = a context of the queried drug with the requested polarity;
+    error = an opposite-polarity context of that drug ranks above the first
+    gold context (or appears in top-k with no gold present).
+    """
+    out: Dict[str, Dict] = {}
+    for arm, retrieve in retrievers.items():
+        rows = []
+        for q in queries:
+            target = q["target"]
+            labels = [context_polarity(c, q["drug"]) for c in retrieve(q["query"])[:k]]
+            r_gold = next((i for i, lab in enumerate(labels, 1) if lab == target), None)
+            other = "opposite" if target == "indication" else "indication"
+            r_opp = next((i for i, lab in enumerate(labels, 1) if lab == other), None)
+            rows.append({**q, "rank_gold": r_gold, "rank_opposite": r_opp,
+                         "recall_at_k": int(r_gold is not None),
+                         "polarity_error": int(r_opp is not None and (r_gold is None or r_opp < r_gold)),
+                         "opposite_in_top_k": int(r_opp is not None),
+                         "reciprocal_rank": 1.0 / r_gold if r_gold else 0.0,
+                         "retrieved_labels": labels})
+        out[arm] = {"overall": _summary(rows), "pair_accuracy": _pair_accuracy(rows),
+                    "per_query": rows}
+    return out
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _default_encoder():
+    from sentence_transformers import SentenceTransformer
+    from src.config import EMBEDDING_MODEL_NAME
+
+    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    return lambda texts: model.encode(list(texts), convert_to_numpy=True,
+                                      normalize_embeddings=True)
+
+
+def run_polarity_benchmark(arms: Sequence[str] = ("bm25", "dense", "hybrid", "hcad", "hcad_kg"),
+                           k: int = POLARITY_TOP_K, output_path: Optional[Path] = None,
+                           encoder=None, hcad_retriever=None) -> Dict:
+    corpus, queries = build_corpus(), build_queries()
+    rankers: Dict[str, Ranker] = {}
+    bm25 = dense = None
+    if {"bm25", "hybrid"} & set(arms):
+        bm25 = make_bm25_ranker(corpus)
+    if {"dense", "hybrid"} & set(arms):
+        dense = make_dense_ranker(corpus, encoder or _default_encoder())
+    for arm in arms:
+        if arm == "bm25":
+            rankers[arm] = bm25
+        elif arm == "dense":
+            rankers[arm] = dense
+        elif arm == "hybrid":
+            rankers[arm] = make_hybrid_ranker(bm25, dense)
+        elif arm == "hcad":
+            rankers[arm] = make_hcad_ranker(corpus, hcad_retriever, with_kg_metadata=False)
+        elif arm == "hcad_kg":
+            rankers[arm] = make_hcad_ranker(corpus, hcad_retriever, with_kg_metadata=True)
+        else:
+            raise ValueError(f"Unknown polarity arm {arm!r}")
+
+    results = evaluate_rankers(rankers, queries, k=k)
+    payload = {
+        "benchmark": "paired_polarity_indication_vs_contraindication",
+        "mode": "corpus",
+        "k": k,
+        "n_pairs": len(PAIRS),
+        "n_queries": len(queries),
+        "n_corpus_statements": len(corpus),
+        "polarity_type_counts": {
+            t: sum(1 for p in PAIRS if p.polarity_type == t) for t in ("contraindication", "caution")
+        },
+        "arms": results["arms"],
+        "significance_mcnemar_polarity_error": results["significance_mcnemar_polarity_error"],
+        "pairs": [asdict(p) for p in PAIRS],
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    out = output_path or (RESULTS_DIR / "polarity_benchmark.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    per_query_path = out.with_name(out.stem + "_per_query.jsonl")
+    with open(per_query_path, "w", encoding="utf-8") as f:
+        for arm, rows in results["per_query"].items():
+            for row in rows:
+                f.write(json.dumps({"arm": arm, **row}) + "\n")
+    logger.info("Polarity benchmark saved to %s (+ %s)", out, per_query_path.name)
+    return payload
+
+
+def run_store_polarity_benchmark(arms: Sequence[str] = ("dense", "hcad"),
+                                 k: int = POLARITY_TOP_K,
+                                 output_path: Optional[Path] = None) -> Dict:
+    """Store mode: full retrieval over the built vector store / PrimeKG."""
+    retrievers: Dict[str, Callable[[str], List[Dict]]] = {}
+    for arm in arms:
+        if arm == "dense":
+            from src.baselines.vanilla_vector_rag import VanillaVectorRAG
+            dense = VanillaVectorRAG()
+            retrievers[arm] = lambda q, d=dense: d.retrieve(q, top_k=k)
+        elif arm == "hcad":
+            from src.core.hcad_retriever import HCADRetriever
+            hcad = HCADRetriever(fail_on_vector_error=True)
+            retrievers[arm] = lambda q, h=hcad: h.retrieve(q)
+        else:
+            raise ValueError(f"Store mode supports arms 'dense' and 'hcad', got {arm!r}")
+    queries = build_queries()
+    results = evaluate_store_retrievers(retrievers, queries, k=k)
+    payload = {
+        "benchmark": "paired_polarity_indication_vs_contraindication",
+        "mode": "store", "k": k, "n_pairs": len(PAIRS), "n_queries": len(queries),
+        "arms": {a: {key: v for key, v in r.items() if key != "per_query"}
+                 for a, r in results.items()},
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
+    out = output_path or (RESULTS_DIR / "polarity_benchmark_store.json")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with open(out.with_name(out.stem + "_per_query.jsonl"), "w", encoding="utf-8") as f:
+        for arm, r in results.items():
+            for row in r["per_query"]:
+                f.write(json.dumps({"arm": arm, **row}) + "\n")
+    logger.info("Store-mode polarity benchmark saved to %s", out)
+    return payload
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--mode", choices=["corpus", "store"], default="corpus",
+                        help="corpus: controlled curated corpus (default); "
+                             "store: full retrieval over the built vector store / PrimeKG")
+    parser.add_argument("--arms", default=None,
+                        help="corpus: bm25,dense,hybrid,hcad,hcad_kg; store: dense,hcad")
+    parser.add_argument("--k", type=int, default=POLARITY_TOP_K)
+    parser.add_argument("--output", type=Path, default=None)
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    if args.mode == "store":
+        arms = [a.strip() for a in (args.arms or "dense,hcad").split(",") if a.strip()]
+        payload = run_store_polarity_benchmark(arms, k=args.k, output_path=args.output)
+        for arm, res in payload["arms"].items():
+            o = res["overall"]
+            print(f"{arm:10s} [store] PolarityRecall@{args.k}={o['polarity_recall_at_k']['mean']:.3f} "
+                  f"PolarityErrorRate={o['polarity_error_rate']['mean']:.3f}")
+        return
+    args.arms = args.arms or "bm25,dense,hybrid,hcad,hcad_kg"
+    payload = run_polarity_benchmark([a.strip() for a in args.arms.split(",") if a.strip()],
+                                     k=args.k, output_path=args.output)
+    for arm, res in payload["arms"].items():
+        o = res["overall"]
+        print(f"{arm:10s} PolarityRecall@{args.k}={o['polarity_recall_at_k']['mean']:.3f} "
+              f"PolarityErrorRate={o['polarity_error_rate']['mean']:.3f} "
+              f"[{o['polarity_error_rate']['ci_low']:.3f}, {o['polarity_error_rate']['ci_high']:.3f}]")
 
 
 if __name__ == "__main__":
-    n = int(sys.argv[1]) if len(sys.argv) > 1 else None
-    runner = PolarityBenchmark()
-    res = runner.run_benchmark(num_pairs=n)
-    print("\n=== POLARITY DISCRIMINATION BENCHMARK RESULTS ===")
-    print(json.dumps(res["summary_metrics"], indent=2))
+    main()

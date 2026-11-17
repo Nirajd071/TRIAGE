@@ -35,3 +35,14 @@ def test_ablation_benchmark_arms():
         "HCAD-Dense Only",
     }
     assert set(bm.arms.keys()) == expected_arms
+
+
+def test_ablation_arms_execution():
+    from unittest.mock import patch
+    import numpy as np
+
+    retriever = HCADRetriever(enable_decoupling=False, enable_aniso=False, enable_decision_gate=False)
+    assert retriever.enable_decoupling is False
+    assert retriever.enable_aniso is False
+    assert retriever.enable_decision_gate is False
+

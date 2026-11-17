@@ -34,8 +34,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-
 from src.core.llm_client import UnifiedLLMClient
 
 logger = logging.getLogger(__name__)
@@ -182,13 +180,21 @@ class BasePaperEvaluator:
         "flexibility",
     ]
 
-    def __init__(self, judge_llm: Optional[UnifiedLLMClient] = None):
-        """Initialize evaluator with a deterministic judge LLM (defaults to Qwen2.5-72B)."""
+    def __init__(self, judge_llm: Optional[UnifiedLLMClient] = None,
+                 name: Optional[str] = None):
+        """Initialize evaluator with a deterministic judge LLM (defaults to Qwen2.5-72B).
+
+        Every judge call is issued with ``json_mode=True`` (Ollama
+        ``format=json`` / OpenAI-style ``response_format=json_object``).
+        """
         if judge_llm is None:
             from src.config import JUDGE_HF_MODEL
             self.judge = UnifiedLLMClient(model=JUDGE_HF_MODEL, temperature=0.0, max_tokens=768)
         else:
             self.judge = judge_llm
+        self.name = name or (
+            f"{getattr(self.judge, 'provider', 'judge')}:{getattr(self.judge, 'model', 'unknown')}"
+        )
 
     def _extract_json(self, raw_text: str) -> Dict[str, Any]:
         """Robustly extract JSON payload from LLM markdown fences or raw strings."""
@@ -593,181 +599,196 @@ class BasePaperEvaluator:
 
 
 # ---------------------------------------------------------------------------
-# Multi-Judge Ensemble Evaluator
+# Multi-Judge Ensemble (advisor directive; reviewer R2)
 # ---------------------------------------------------------------------------
 
-class MultiJudgeEvaluator:
-    """Multi-Judge Ensemble Evaluator addressing reviewer critique on single-judge noise.
+SCORE_DIMENSIONS = ("comprehensiveness", "diversity", "empowerment", "logical",
+                    "readability", "overall_score")
 
-    Orchestrates an ensemble of heterogeneous or multi-model judges (e.g. Gemma-2-9B,
-    Qwen-2.5-14B, Llama-3.3-70B), computes consensus scores, majority-vote winners,
-    inter-judge agreement (Cohen's / Fleiss' Kappa), and judge variance metrics.
+
+def merge_counterbalanced(ab_result: Dict, ba_result: Dict) -> Dict:
+    """Merge AB and BA pairwise verdicts of ONE judge (position-bias control).
+
+    A criterion keeps its winner only when both presentation orders agree;
+    disagreement is a Tie. Labels are already mapped to system names.
+    """
+    merged = {}
+    ab_c = ab_result.get("criteria_winners", {})
+    ba_c = ba_result.get("criteria_winners", {})
+    for crit in BasePaperEvaluator.CRITERIA_LIST:
+        a, b = ab_c.get(crit, "Tie"), ba_c.get(crit, "Tie")
+        merged[crit] = a if a == b else "Tie"
+    ab_o, ba_o = ab_result.get("overall_winner", "Tie"), ba_result.get("overall_winner", "Tie")
+    return {
+        "criteria_winners": merged,
+        "overall_winner": ab_o if ab_o == ba_o else "Tie",
+        "order_consistent": ab_o == ba_o,
+        "summary": f"AB: {ab_result.get('summary', '')} | BA: {ba_result.get('summary', '')}",
+    }
+
+
+def majority_vote(labels: List[str]) -> str:
+    """Plurality label across judges; any tie for first place -> "Tie"."""
+    if not labels:
+        return "Tie"
+    counts: Dict[str, int] = {}
+    for lab in labels:
+        counts[lab] = counts.get(lab, 0) + 1
+    best = max(counts.values())
+    leaders = [lab for lab, c in counts.items() if c == best]
+    return leaders[0] if len(leaders) == 1 else "Tie"
+
+
+class MultiJudgeEvaluator:
+    """Ensemble of independent LLM judges (default: gemma2:9b + qwen2.5:14b).
+
+    - Each judge scores / compares independently; per-judge verdicts are
+      kept so inter-judge agreement (Cohen's / Fleiss' kappa) can be
+      computed from the checkpoint.
+    - Consensus rubric score = mean over judges that returned a valid JSON
+      verdict; consensus pairwise verdict = plurality vote over judges'
+      counterbalanced (AB+BA) verdicts.
+    - A judge failure is recorded as missing (None) and counted. It is
+      NEVER replaced by a neutral 50.0 / "Tie" fallback: those fallbacks
+      previously leaked into Table 4 as artificial ties.
     """
 
-    def __init__(
-        self,
-        judges: Optional[List[Any]] = None,
-    ):
-        from src.config import JUDGE_PANEL
+    def __init__(self, evaluators: Optional[List[Any]] = None, judges: Optional[List[Any]] = None):
+        items = evaluators if evaluators is not None else judges
+        if items is None or len(items) == 0:
+            raise ValueError("MultiJudgeEvaluator needs at least one judge")
+        self.evaluators = []
+        for e in items:
+            name = getattr(e, "name", None) or getattr(getattr(e, "judge", None), "model", None) or "judge"
+            e.name = name
+            self.evaluators.append(e)
+        names = [e.name for e in self.evaluators]
+        if len(set(names)) != len(names):
+            raise ValueError(f"Duplicate judge names in ensemble: {names}")
 
-        self.evaluators: List[Tuple[str, BasePaperEvaluator]] = []
+    @property
+    def judge_names(self) -> List[str]:
+        return [e.name for e in self.evaluators]
 
-        raw_panel = judges if judges is not None else JUDGE_PANEL
-        for item in raw_panel:
-            if isinstance(item, BasePaperEvaluator):
-                model_name = getattr(item.judge, "model", "evaluator")
-                self.evaluators.append((model_name, item))
-            elif isinstance(item, UnifiedLLMClient):
-                self.evaluators.append((item.model, BasePaperEvaluator(judge_llm=item)))
-            elif isinstance(item, tuple) and len(item) == 2:
-                provider, model = item
-                client = UnifiedLLMClient(model=model, temperature=0.0, max_tokens=768)
-                self.evaluators.append((model, BasePaperEvaluator(judge_llm=client)))
-            elif isinstance(item, str):
-                client = UnifiedLLMClient(model=item, temperature=0.0, max_tokens=768)
-                self.evaluators.append((item, BasePaperEvaluator(judge_llm=client)))
+    @classmethod
+    def from_config(cls) -> "MultiJudgeEvaluator":
+        """Build the ensemble from ``config.judge_ensemble_specs()``.
 
-        if not self.evaluators:
-            # Fallback to single default evaluator
-            ev = BasePaperEvaluator()
-            self.evaluators.append((getattr(ev.judge, "model", "default_judge"), ev))
+        Judge clients are STRICT: no provider/model substitution, so a
+        result labelled 'gemma2:9b' was scored by gemma2:9b.
+        """
+        from src.config import JUDGE_MAX_TOKENS, JUDGE_TEMPERATURE, judge_ensemble_specs
 
-        self.judge_names = [name for name, _ in self.evaluators]
-        logger.info("MultiJudgeEvaluator active with %d judges: %s", len(self.evaluators), self.judge_names)
+        evaluators = []
+        for provider, model in judge_ensemble_specs():
+            client = UnifiedLLMClient(model=model, provider=provider,
+                                      temperature=JUDGE_TEMPERATURE,
+                                      max_tokens=JUDGE_MAX_TOKENS, strict=True)
+            evaluators.append(BasePaperEvaluator(judge_llm=client,
+                                                 name=f"{provider}:{model}"))
+        return cls(evaluators)
 
-    def evaluate_scoring(
-        self,
-        question: str,
-        answer: str,
-        reference_document: str,
-        answer_evidence: str = "No retrieved evidence was supplied for this answer.",
-        retries: int = 1,
-        fallback_on_error: bool = True,
-    ) -> Dict[str, Any]:
-        """Evaluate 5 dimensions across all judges in the panel and aggregate consensus."""
-        judge_results: Dict[str, ScoringResult] = {}
-        dims = ["comprehensiveness", "diversity", "empowerment", "logical", "readability", "overall_score"]
+    def manifest(self) -> List[Dict[str, str]]:
+        return [{"name": e.name,
+                 "provider": getattr(e.judge, "provider", ""),
+                 "model": getattr(e.judge, "model", "")} for e in self.evaluators]
 
-        for model_name, evaluator in self.evaluators:
-            res = evaluator.evaluate_scoring(
-                question=question,
-                answer=answer,
-                reference_document=reference_document,
-                answer_evidence=answer_evidence,
-                retries=retries,
-                fallback_on_error=fallback_on_error,
-            )
-            judge_results[model_name] = res
+    # -- scoring ---------------------------------------------------------------
+    def evaluate_scoring(self, question: str, answer: str, reference_document: str,
+                         answer_evidence: str = "No retrieved evidence was supplied for this answer.",
+                         retries: int = 1, fallback_on_error: bool = False) -> Dict[str, Any]:
+        per_judge: Dict[str, Optional[Dict[str, Any]]] = {}
+        for ev in self.evaluators:
+            name = getattr(ev, "name", None) or getattr(getattr(ev, "judge", None), "model", "judge")
+            try:
+                raw = ev.evaluate_scoring(
+                    question, answer, reference_document,
+                    answer_evidence=answer_evidence, retries=retries,
+                    fallback_on_error=fallback_on_error)
+                per_judge[name] = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
+            except Exception as exc:
+                logger.warning("Judge %s scoring failed: %s", name, exc)
+                per_judge[name] = None
+        valid = [r for r in per_judge.values() if r]
+        consensus = (
+            {d: sum(r[d] for r in valid) / len(valid) for d in SCORE_DIMENSIONS}
+            if valid else None
+        )
+        return {"per_judge": per_judge, "consensus": consensus,
+                "n_valid_judges": len(valid), "num_judges": len(self.evaluators)}
 
-        # Aggregate consensus
-        consensus_scores: Dict[str, float] = {}
-        score_std: Dict[str, float] = {}
-        for dim in dims:
-            vals = [getattr(r, dim) for r in judge_results.values()]
-            consensus_scores[dim] = float(np.mean(vals))
-            score_std[dim] = float(np.std(vals))
-
-        return {
-            "consensus": consensus_scores,
-            "std": score_std,
-            "per_judge": {m: r.to_dict() for m, r in judge_results.items()},
-            "num_judges": len(self.evaluators),
-        }
-
-    def evaluate_selection(
-        self,
-        question: str,
-        answer_a: str,
-        answer_b: str,
-        reference_document: str,
-        label_a: str = "System A",
-        label_b: str = "System B",
-        evidence_a: str = "No retrieved evidence was supplied for this answer.",
-        evidence_b: str = "No retrieved evidence was supplied for this answer.",
-        retries: int = 1,
-        fallback_on_error: bool = True,
-    ) -> Dict[str, Any]:
-        """Evaluate pairwise comparison across all judges and determine consensus."""
-        from src.evaluation.metrics import cohens_kappa, fleiss_kappa
-
-        judge_selections: Dict[str, Dict[str, Any]] = {}
-
-        for model_name, evaluator in self.evaluators:
-            sel = evaluator.evaluate_selection(
-                question=question,
-                answer_a=answer_a,
-                answer_b=answer_b,
-                reference_document=reference_document,
-                label_a=label_a,
-                label_b=label_b,
-                evidence_a=evidence_a,
-                evidence_b=evidence_b,
-                retries=retries,
-                fallback_on_error=fallback_on_error,
-            )
-            judge_selections[model_name] = sel
-
-        # Tally criteria winners
-        criteria_consensus: Dict[str, str] = {}
-        criteria_votes: Dict[str, Dict[str, int]] = {}
-
-        for crit in BasePaperEvaluator.CRITERIA_LIST:
-            votes = {label_a: 0, label_b: 0, "Tie": 0}
-            for sel in judge_selections.values():
-                w = sel.get("criteria_winners", {}).get(crit, "Tie")
-                votes[w] = votes.get(w, 0) + 1
-            criteria_votes[crit] = votes
-            # Determine majority winner
-            if votes[label_a] > votes[label_b] and votes[label_a] > votes["Tie"]:
-                criteria_consensus[crit] = label_a
-            elif votes[label_b] > votes[label_a] and votes[label_b] > votes["Tie"]:
-                criteria_consensus[crit] = label_b
-            else:
-                criteria_consensus[crit] = "Tie"
-
-        # Overall winner consensus
-        overall_votes = {label_a: 0, label_b: 0, "Tie": 0}
-        for sel in judge_selections.values():
-            ow = sel.get("overall_winner", "Tie")
-            overall_votes[ow] = overall_votes.get(ow, 0) + 1
-
-        if overall_votes[label_a] > overall_votes[label_b] and overall_votes[label_a] > overall_votes["Tie"]:
-            consensus_overall = label_a
-        elif overall_votes[label_b] > overall_votes[label_a] and overall_votes[label_b] > overall_votes["Tie"]:
-            consensus_overall = label_b
+    # -- pairwise selection ----------------------------------------------------
+    def evaluate_selection(self, question: str, answer_a: str, answer_b: str,
+                           reference_document: str, label_a: str = "System A", label_b: str = "System B",
+                           evidence_a: str = "No retrieved evidence was supplied for this answer.",
+                           evidence_b: str = "No retrieved evidence was supplied for this answer.",
+                           retries: int = 1, fallback_on_error: bool = False) -> Dict[str, Any]:
+        """Counterbalanced (AB + BA) comparison by every judge, then vote."""
+        per_judge: Dict[str, Optional[Dict[str, Any]]] = {}
+        for ev in self.evaluators:
+            name = getattr(ev, "name", None) or getattr(getattr(ev, "judge", None), "model", "judge")
+            try:
+                ab = ev.evaluate_selection(question, answer_a, answer_b, reference_document,
+                                           label_a=label_a, label_b=label_b,
+                                           evidence_a=evidence_a, evidence_b=evidence_b,
+                                           retries=retries, fallback_on_error=fallback_on_error)
+                ba = ev.evaluate_selection(question, answer_b, answer_a, reference_document,
+                                           label_a=label_b, label_b=label_a,
+                                           evidence_a=evidence_b, evidence_b=evidence_a,
+                                           retries=retries, fallback_on_error=fallback_on_error)
+                if isinstance(ab, dict) and "criteria_winners" in ab:
+                    per_judge[name] = merge_counterbalanced(ab, ba)
+                else:
+                    per_judge[name] = ab
+            except Exception as exc:
+                logger.warning("Judge %s selection failed: %s", name, exc)
+                per_judge[name] = None
+        valid = [v for v in per_judge.values() if v]
+        if valid:
+            consensus = {
+                "criteria_winners": {
+                    c: majority_vote([v["criteria_winners"][c] for v in valid if "criteria_winners" in v and c in v["criteria_winners"]])
+                    for c in BasePaperEvaluator.CRITERIA_LIST
+                },
+                "overall_winner": majority_vote([v["overall_winner"] for v in valid if "overall_winner" in v]),
+            }
         else:
-            consensus_overall = "Tie"
+            consensus = None
 
-        # Agreement metrics across judges on the 8 criteria
-        categories = [label_a, label_b, "Tie"]
-        agreement_metric = {"type": "none", "kappa": 1.0}
+        overall_winner = consensus["overall_winner"] if consensus else "Tie"
+        criteria_winners = consensus["criteria_winners"] if consensus else {}
 
-        judge_names = list(judge_selections.keys())
-        if len(judge_names) == 2:
-            j1, j2 = judge_names[0], judge_names[1]
-            r1 = [judge_selections[j1]["criteria_winners"].get(c, "Tie") for c in BasePaperEvaluator.CRITERIA_LIST]
-            r2 = [judge_selections[j2]["criteria_winners"].get(c, "Tie") for c in BasePaperEvaluator.CRITERIA_LIST]
-            kappa = cohens_kappa(r1, r2, categories=categories)
-            agreement_metric = {"type": "cohens_kappa", "kappa": kappa}
-        elif len(judge_names) > 2:
-            # Build (N=8, k=3) matrix for Fleiss' Kappa
-            matrix = np.zeros((len(BasePaperEvaluator.CRITERIA_LIST), len(categories)), dtype=np.float64)
-            cat_map = {c: i for i, c in enumerate(categories)}
+        # Compute inter-judge agreement
+        valid_keys = [k for k, v in per_judge.items() if v and "criteria_winners" in v]
+        agreement = {"type": "none", "kappa": 1.0}
+        if len(valid_keys) == 2:
+            from src.evaluation.metrics import cohens_kappa
+            j1, j2 = valid_keys[0], valid_keys[1]
+            r1 = [per_judge[j1]["criteria_winners"].get(c, "Tie") for c in BasePaperEvaluator.CRITERIA_LIST]
+            r2 = [per_judge[j2]["criteria_winners"].get(c, "Tie") for c in BasePaperEvaluator.CRITERIA_LIST]
+            k_val = cohens_kappa(r1, r2, categories=[label_a, label_b, "Tie"])
+            agreement = {"type": "cohens_kappa", "kappa": k_val}
+        elif len(valid_keys) > 2:
+            from src.evaluation.metrics import fleiss_kappa
+            cats = [label_a, label_b, "Tie"]
+            cat_map = {c: i for i, c in enumerate(cats)}
+            matrix = np.zeros((len(BasePaperEvaluator.CRITERIA_LIST), len(cats)), dtype=np.float64)
             for i, crit in enumerate(BasePaperEvaluator.CRITERIA_LIST):
-                for jname in judge_names:
-                    w = judge_selections[jname]["criteria_winners"].get(crit, "Tie")
+                for jname in valid_keys:
+                    w = per_judge[jname]["criteria_winners"].get(crit, "Tie")
                     if w in cat_map:
                         matrix[i, cat_map[w]] += 1.0
-            kappa = fleiss_kappa(matrix)
-            agreement_metric = {"type": "fleiss_kappa", "kappa": kappa}
+            k_val = fleiss_kappa(matrix)
+            agreement = {"type": "fleiss_kappa", "kappa": k_val}
 
         return {
-            "criteria_winners": criteria_consensus,
-            "overall_winner": consensus_overall,
-            "criteria_votes": criteria_votes,
-            "overall_votes": overall_votes,
-            "agreement": agreement_metric,
-            "per_judge": judge_selections,
+            "system_a": label_a,
+            "system_b": label_b,
+            "per_judge": per_judge,
+            "consensus": consensus,
+            "n_valid_judges": len(valid),
             "num_judges": len(self.evaluators),
+            "overall_winner": overall_winner,
+            "criteria_winners": criteria_winners,
+            "agreement": agreement,
         }
-

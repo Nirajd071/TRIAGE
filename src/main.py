@@ -133,20 +133,37 @@ def cmd_demo(args):
     # Load systems
     try:
         from src.baselines.baseline_llm import BaselineLLM
+        from src.baselines.bm25_rag import BM25RAG, HybridRAG
         from src.baselines.vanilla_vector_rag import VanillaVectorRAG
         from src.core.hcad_retriever import HCADRetriever
 
-        print("[1/3] Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)...")
+        print("[1/5] Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)...")
         baseline = BaselineLLM()
         b_answer = baseline.generate(query)
         print(f"  Answer:\n{b_answer.strip()}\n")
 
-        print("[2/3] Dense RAG (S-PubMedBERT, top-5)...")
+        print("[2/5] BM25 Lexical RAG (Sparse)...")
+        try:
+            bm25 = BM25RAG()
+            bm_answer = bm25.retrieve_and_generate(query)
+            print(f"  Answer:\n{bm_answer.strip()}\n")
+        except Exception as e:
+            print(f"  BM25 Skipped: {e}\n")
+
+        print("[3/5] Vanilla Dense Vector-RAG (PubMedBERT Top-5)...")
         vanilla = VanillaVectorRAG()
         v_answer = vanilla.retrieve_and_generate(query)
         print(f"  Answer:\n{v_answer.strip()}\n")
 
-        print("[3/3] HCAD-RAG (Proposed)...")
+        print("[4/5] Hybrid BM25 + Dense RAG (Convex Fusion)...")
+        try:
+            hybrid = HybridRAG()
+            hy_answer = hybrid.retrieve_and_generate(query)
+            print(f"  Answer:\n{hy_answer.strip()}\n")
+        except Exception as e:
+            print(f"  Hybrid Skipped: {e}\n")
+
+        print("[5/5] HCAD-RAG (Full Proposed Architecture)...")
         hcad = HCADRetriever()
         h_answer = hcad.retrieve_and_generate(query)
         print(f"  Answer:\n{h_answer.strip()}\n")
@@ -217,7 +234,7 @@ Examples:
 
     # benchmark
     p_bench = subparsers.add_parser(
-        "benchmark", help="Alias of base-paper: closed-book vs BM25 vs dense vs hybrid vs HCAD-RAG")
+        "benchmark", help="Alias of base-paper: full 3-way comparison (Baseline vs Vanilla RAG vs HCAD-RAG)")
     p_bench.add_argument(
         "--question-pool", choices=["test", "dev"], default="test",
         help="Question pool: test (held-out evaluation) or dev (training/tuning)",
@@ -240,39 +257,24 @@ Examples:
         "--samples", type=int, default=50,
         help="Number of paper-protocol questions ",
     )
+    p_bp.add_argument("--multi-judge", action="store_true", help="Use multi-judge ensemble (JUDGE_PANEL)")
     p_bp.add_argument("--plot", action="store_true", help="Render result figures to results/figures/")
     p_bp.add_argument("--no-wandb", action="store_true", help="Disable W&B tracking for this run")
     p_bp.set_defaults(func=cmd_base_paper)
 
-    for p_ in (p_eval, p_bench, p_bp):
-        p_.add_argument("--arms", default=None,
-                        help="comma list: closed_book,bm25,dense,hybrid,hcad,"
-                             "hcad_no_decoupling,hcad_no_gs,hcad_no_gate")
-        p_.add_argument("--ablations", action="store_true",
-                        help="add the three HCAD component-ablation arms")
-        p_.add_argument("--latency-runs", type=int, default=None,
-                        help="warm timed retrieval runs per question (default LATENCY_TIMED_RUNS)")
-
-    # polarity benchmark (reviewers: titular claim untested)
+    # polarity-eval
     p_pol = subparsers.add_parser(
-        "polarity", help="Indication vs contraindication paired-polarity retrieval benchmark")
-    p_pol.add_argument("--mode", choices=["corpus", "store"], default="corpus",
-                       help="corpus: curated minimal-pair corpus; store: full KG/vector-store retrieval")
-    p_pol.add_argument("--arms", default=None,
-                       help="corpus: bm25,dense,hybrid,hcad,hcad_kg; store: dense,hcad")
-    p_pol.add_argument("--k", type=int, default=None)
-    p_pol.set_defaults(func=cmd_polarity)
+        "polarity-eval", help="Run clinical Polarity Discrimination Benchmark (Indication vs Contraindication)",
+    )
+    p_pol.add_argument("--pairs", type=int, default=None, help="Number of paired clinical cases to run")
+    p_pol.set_defaults(func=cmd_polarity_eval)
 
-    # MedHallu
-    p_mh = subparsers.add_parser("medhallu", help="MedHallu hallucination evaluation")
-    p_mh.add_argument("--system", default="detector",
-                      choices=["detector", "closed_book", "dense", "hcad"])
-    p_mh.add_argument("--n", type=int, default=200)
-    p_mh.set_defaults(func=cmd_medhallu)
-
-    # tables + figures (+ methodology diagram) from saved JSON
-    p_fig = subparsers.add_parser("figures", help="Generate paper tables and figures from results JSON")
-    p_fig.set_defaults(func=cmd_figures)
+    # ablation-eval
+    p_abl = subparsers.add_parser(
+        "ablation-eval", help="Run component ablation sweep (w/o decoupling, gate, aniso, hypergraph)",
+    )
+    p_abl.add_argument("--samples", type=int, default=10, help="Number of benchmark samples to evaluate")
+    p_abl.set_defaults(func=cmd_ablation_eval)
 
     # save-pipeline
     p_tt = subparsers.add_parser(
@@ -337,49 +339,16 @@ def cmd_serve(args):
     uvicorn.run(app, host=args.host, port=args.port)
 
 def cmd_evaluate(args):
-    """Alias of base-paper: the multi-arm, multi-judge benchmark."""
+    """Alias of base-paper: the benchmark evaluates all three systems."""
     from src.evaluation.run_base_paper_benchmark import run_benchmark
-    logger.info("Evaluating all arms (%d samples)...", args.samples)
-    run_benchmark(num_samples=args.samples, question_pool=args.question_pool,
-                  **_benchmark_kwargs(args))
-
-def _benchmark_kwargs(args) -> dict:
-    kwargs = {}
-    if getattr(args, "arms", None):
-        kwargs["arms"] = [a.strip() for a in args.arms.split(",") if a.strip()]
-    if getattr(args, "ablations", False):
-        kwargs["include_ablations"] = True
-    if getattr(args, "latency_runs", None):
-        kwargs["latency_runs"] = args.latency_runs
-    return kwargs
-
+    logger.info("Evaluating all three systems (%d samples)...", args.samples)
+    run_benchmark(num_samples=args.samples, question_pool=args.question_pool)
 
 def cmd_benchmark(args):
-    """Run the multi-arm, multi-judge benchmark."""
+    """Run full 3-way benchmark comparison (Baseline vs Vanilla RAG vs HCAD-RAG)."""
     from src.evaluation.run_base_paper_benchmark import run_benchmark
-    logger.info("Running benchmark (%d samples per system)...", args.samples)
-    run_benchmark(num_samples=args.samples, question_pool=args.question_pool,
-                  **_benchmark_kwargs(args))
-
-
-def cmd_polarity(args):
-    from src.evaluation.polarity_benchmark import main as polarity_main
-    argv = ["--mode", args.mode]
-    if args.arms:
-        argv += ["--arms", args.arms]
-    if args.k:
-        argv += ["--k", str(args.k)]
-    polarity_main(argv)
-
-
-def cmd_medhallu(args):
-    from src.evaluation.hallucination_evaluator import main as medhallu_main
-    medhallu_main(["--system", args.system, "--n", str(args.n)])
-
-
-def cmd_figures(args):
-    from src.evaluation.generate_figures import main as figures_main
-    figures_main([])
+    logger.info("Running full 3-way benchmark (%d samples per system)...", args.samples)
+    run_benchmark(num_samples=args.samples, question_pool=args.question_pool)
 
 def cmd_base_paper(args):
     """Run the base-paper (Hyper-RAG, arXiv:2504.08758) evaluation protocol."""
@@ -389,25 +358,40 @@ def cmd_base_paper(args):
         import src.config as _cfg
         _cfg.WANDB_MODE = "disabled"
     from src.evaluation.run_base_paper_benchmark import run_benchmark
-    results = run_benchmark(num_samples=args.samples, question_pool=args.question_pool,
-                            **_benchmark_kwargs(args))
+    results = run_benchmark(
+        num_samples=args.samples,
+        question_pool=args.question_pool,
+        use_multi_judge=getattr(args, "multi_judge", False),
+    )
     if getattr(args, "plot", False) and results:
-        import os
-        from src.evaluation.generate_figures import generate_all
-        from src.config import FIGURES_DIR, RESULTS_DIR, TABLES_DIR
-        results_name = os.getenv("BENCHMARK_RESULTS_FILE", "base_paper_benchmark_results.json")
-        is_main = results_name == "base_paper_benchmark_results.json"
-        # Variant runs (e.g. learned tensor) render into their own subfolders
-        # so they can never overwrite the main paper figures/tables.
-        sub = "" if is_main else os.path.splitext(results_name)[0]
-        manifest = generate_all(
-            RESULTS_DIR / results_name,
-            RESULTS_DIR / "polarity_benchmark.json" if is_main else None,
-            sorted((RESULTS_DIR / "hallucination").glob("medhallu_*.json")) if is_main else (),
-            figures_dir=FIGURES_DIR / sub if sub else None,
-            tables_dir=TABLES_DIR / sub if sub else None)
-        for name, p_ in manifest["figures"].items():
-            logger.info("Figure saved: %s (%s)", p_, name)
+        from src.evaluation.plots import plot_all
+        from pathlib import Path as _P
+        paths = plot_all(
+            results,
+            hallu_path=_P("results/tables/hallucination_hcad-rag.json"),
+            latency_path=_P("results/latency_breakdown.json"),
+            polarity_path=_P("results/polarity_benchmark_results.json"),
+        )
+        for p_ in paths:
+            logger.info("Figure saved: %s", p_)
+
+def cmd_polarity_eval(args):
+    """Run Polarity Discrimination Benchmark (Indication vs Contraindication)."""
+    from src.evaluation.polarity_benchmark import PolarityBenchmark
+    benchmark = PolarityBenchmark()
+    logger.info("Starting Polarity Discrimination Benchmark (pairs=%s)...", args.pairs)
+    res = benchmark.run_benchmark(num_pairs=args.pairs)
+    logger.info("Polarity benchmark completed successfully.")
+
+def cmd_ablation_eval(args):
+    """Run component ablation sweep (w/o decoupling, gate, aniso, hypergraph)."""
+    from src.evaluation.ablation_benchmark import AblationBenchmark
+    from src.evaluation.run_base_paper_benchmark import load_clinical_benchmark_samples
+    samples = load_clinical_benchmark_samples(num_samples=args.samples)
+    benchmark = AblationBenchmark()
+    logger.info("Starting Component Ablation Sweep (%d samples)...", len(samples))
+    res = benchmark.run_ablation_sweep(samples)
+    logger.info("Ablation sweep completed successfully.")
 
 def cmd_train_tensor(args):
     """Train the dynamic anisotropic tensor on dev-pool questions (leakage-safe)."""

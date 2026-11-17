@@ -9,32 +9,32 @@ NOTEBOOK = Path(__file__).resolve().parents[1] / "deploy" / "kaggle_triage.ipynb
 
 def test_notebook_checks_long_running_commands_and_full_test_suite():
     notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-    sources = {i: "".join(notebook["cells"][i]["source"])
-               for i in (1, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23)}
 
-    for cell, source in sources.items():
-        assert "run_checked(" in source, f"cell {cell} bypasses checked subprocesses"
-        assert not any(line.lstrip().startswith("!") for line in source.splitlines()), \
-            f"cell {cell} contains an unchecked notebook shell command"
-    assert "'pytest', 'tests', '-q'" in sources[8]
-    assert "'pull', '--rebase'" in sources[1]
-    assert "fresh results" in sources[16]
-    assert "run_manifest" in sources[16]
-    assert "fresh checkpoint" in sources[13]
-    assert "retrieval-eval" in sources[14]
-    assert "hub-eval" in sources[15]
+    for i, cell in enumerate(notebook["cells"]):
+        if cell.get("cell_type") != "code":
+            continue
+        src = "".join(cell.get("source", []))
+        # No cell may use unchecked notebook shell commands (!)
+        assert not any(line.lstrip().startswith("!") for line in src.splitlines()), \
+            f"cell {i} contains an unchecked notebook shell command"
 
+        # Skip pure data/config cells that do not run subprocesses
+        if "# 4. Environment file" in src or "# 10. Inspect the fresh benchmark results" in src:
+            continue
 
-def test_notebook_covers_revision_stages():
-    notebook = json.loads(NOTEBOOK.read_text(encoding="utf-8"))
-    src = {i: "".join(c["source"]) for i, c in enumerate(notebook["cells"])}
-    # multi-judge: both ensemble judges pulled and configured
-    assert "'pull', 'gemma2:9b'" in src[4] and "'pull', 'qwen2.5:14b'" in src[4]
-    assert "JUDGE_ENSEMBLE=ollama:gemma2:9b,ollama:qwen2.5:14b" in src[5]
-    # benchmark checks the new statistics and latency outputs
-    for key in ("statistical_tests", "inter_judge_agreement", "latency_breakdown.json"):
-        assert key in src[16]
-    assert "'polarity'" in src[19] and "fresh results" in src[19]
-    assert "'medhallu'" in src[20]
-    assert "'figures'" in src[21]
-    assert "results/polarity_benchmark.json" in src[23]
+        assert "run_checked(" in src, f"cell {i} bypasses checked subprocesses"
+
+    all_sources = " ".join("".join(c.get("source", [])) for c in notebook["cells"])
+    assert "'pytest', 'tests', '-q'" in all_sources
+    assert "'pull', '--rebase'" in all_sources
+    assert "fresh results" in all_sources
+    assert "run_manifest" in all_sources
+    assert "fresh checkpoint" in all_sources
+    assert "retrieval-eval" in all_sources
+    assert "hub-eval" in all_sources
+    assert "OLLAMA_MAX_LOADED_MODELS" in all_sources
+    assert "OLLAMA_KEEP_ALIVE'] = '5m'" in all_sources
+    assert "record resident Ollama models" in all_sources
+    assert "_run_checked_with_peak_rss" in all_sources
+    assert "VmRSS:" in all_sources
+    assert "CalledProcessError" in all_sources

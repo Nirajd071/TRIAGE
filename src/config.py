@@ -321,13 +321,30 @@ EVIDENCE_WORD_BUDGET = 350
 # Vanilla Baseline
 VANILLA_TOP_K = 5
 
+# BM25 Baseline & Hybrid
+BM25_TOP_K = 5
+BM25_K1 = 1.5
+BM25_B = 0.75
+BM25_INDEX_DIR = DATA_DIR / "bm25"
+BM25_INDEX_PATH = BM25_INDEX_DIR / "bm25_index.pkl"
+HYBRID_BM25_WEIGHT = 0.5
+
+# Canonical System Names for Papers / Reports / Benchmarks
+BASELINE_SYSTEM_NAME = "Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)"
+VANILLA_SYSTEM_NAME = "Vanilla Dense RAG (PubMedBERT + Llama-3.1-8B)"
+BM25_SYSTEM_NAME = "BM25 Lexical RAG (Llama-3.1-8B)"
+HYBRID_SYSTEM_NAME = "Hybrid BM25+Dense RAG (Llama-3.1-8B)"
+HCAD_SYSTEM_NAME = "HCAD-RAG (Full Proposed Architecture)"
+
 # LLM Configuration
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")  # "nvidia", "huggingface", or "ollama"
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Separate judge to avoid self-preference bias
-# Base-paper parity : 72B-class judge as in the paper's
-# protocol. Fits A100 80GB locally (Q4). Override to qwen3:14b for small GPUs.
-JUDGE_OLLAMA_MODEL = os.getenv("JUDGE_OLLAMA_MODEL", "qwen2.5:72b")
+# Base-paper parity: 72B-class judge as in the paper's protocol.
+# Historical runs & base paper default: Qwen2.5:14b.
+JUDGE_OLLAMA_MODEL = os.getenv("JUDGE_OLLAMA_MODEL", "qwen2.5:14b")
+# Multi-Judge Panel (comma-separated list of judge models, e.g. "qwen2.5:14b,gemma2:9b")
+JUDGE_PANEL = [m.strip() for m in os.getenv("JUDGE_PANEL", "qwen2.5:14b,gemma2:9b").split(",") if m.strip()]
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 # Text-optimized NIM models (vision-instruct variants underperform on clinical

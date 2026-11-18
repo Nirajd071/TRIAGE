@@ -102,6 +102,54 @@ NARY_FACTS_PER_QUERY = 10
 # type before lower-scored items of other relations/prose are preferred.
 MAX_EVIDENCE_PER_RELATION = 3
 
+# ---------------------------------------------------------------------------
+# Evidence assembly (HCAD-RAG final context, same 350-word budget as dense RAG)
+# ---------------------------------------------------------------------------
+# Dense anchor: the top-K full-text dense matches are always admitted (slot
+# and words reserved) when their cosine clears DENSE_ANCHOR_MIN; they keep
+# their hybrid-score position. The E/R/M channels compare short extracted
+# fragments, so prose passages (no entity/relation metadata -> missing-
+# channel prior) were systematically out-ranked by short KG triples, and the
+# passage that best matches the whole question could be gated out. With the
+# anchor, HCAD's evidence is "best dense passage + structure-selected
+# complement", so the comparison with dense RAG isolates what the
+# structured selection adds. HCAD_DENSE_ANCHOR_K=0 restores legacy selection.
+DENSE_ANCHOR_K = 1
+DENSE_ANCHOR_MIN = 0.40
+
+
+def dense_anchor_k() -> int:
+    try:
+        return max(0, int(os.environ.get("HCAD_DENSE_ANCHOR_K", DENSE_ANCHOR_K)))
+    except ValueError:
+        return DENSE_ANCHOR_K
+
+
+def dense_anchor_min() -> float:
+    try:
+        return float(os.environ.get("HCAD_DENSE_ANCHOR_MIN", DENSE_ANCHOR_MIN))
+    except ValueError:
+        return DENSE_ANCHOR_MIN
+
+
+# Hyperedge rendering: KG triples sharing (head, relation) are emitted as ONE
+# evidence line ("Metformin is indicated for: A; B; C.") instead of repeating
+# head + verb per fact - the hyperedge as a unit, ~3x more facts per word of
+# the shared budget. HCAD_GROUP_FACTS=0 restores one line per triple.
+GROUP_KG_FACTS = True
+GROUP_MAX_TAILS = 5
+
+
+def group_kg_facts_enabled() -> bool:
+    default = "1" if GROUP_KG_FACTS else "0"
+    return os.environ.get("HCAD_GROUP_FACTS", default) == "1"
+
+
+# Budget packing: an item that does not fit the remaining word budget is
+# clipped at a sentence boundary (as the dense arm does) when at least this
+# many words remain, instead of being dropped.
+MIN_CLIP_WORDS = 25
+
 # Semantic Decoupling 
 ORTHO_STRENGTH = 0.70        # soft Gram-Schmidt blend weight (eta)
 GS_EPS = 1e-8
@@ -325,9 +373,20 @@ VANILLA_TOP_K = 5
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")  # "nvidia", "huggingface", or "ollama"
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Separate judge to avoid self-preference bias
-# Base-paper parity : 72B-class judge as in the paper's
-# protocol. Fits A100 80GB locally (Q4). Override to qwen3:14b for small GPUs.
-JUDGE_OLLAMA_MODEL = os.getenv("JUDGE_OLLAMA_MODEL", "qwen2.5:72b")
+# Local (ollama) judge. Resolved from the registry in src/judge_models.py:
+#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > qwen2.5:72b.
+# The Kaggle notebook sets JUDGE_MODEL_INDEX; never edit tags here.
+from src.judge_models import resolve_judge_ollama_model as _resolve_judge
+
+JUDGE_OLLAMA_MODEL = _resolve_judge()
+# Judge context window. The pairwise prompt carries two answers (up to
+# LLM_MAX_TOKENS each) plus two evidence blocks; Ollama's small default
+# context silently truncates the front of the prompt (the instructions).
+JUDGE_NUM_CTX = int(os.getenv("JUDGE_NUM_CTX", "8192"))
+# Abort the benchmark when more than this fraction of judge evaluations in
+# the current session failed (unparseable JSON / OOM / timeouts): such a run
+# measures nothing. Checkpointed questions survive the abort.
+JUDGE_MAX_FAILURE_RATE = float(os.getenv("JUDGE_MAX_FAILURE_RATE", "0.5"))
 NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
 NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
 # Text-optimized NIM models (vision-instruct variants underperform on clinical
@@ -338,7 +397,12 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hub downloads (SapBERT/S-PubMedBert) sti
 WANDB_PROJECT = os.getenv("WANDB_PROJECT", "hcad-rag")
 WANDB_ENTITY = os.getenv("WANDB_ENTITY") or None
 WANDB_MODE = os.getenv("WANDB_MODE", "online")
-LLM_MODEL = "llama3.1:8b"
+# Generator: Llama-3.1-8B-Instruct, 4-bit (Q4_K_M, ~4.9 GB). Explicit quant
+# tag (identical weights to Ollama's default "llama3.1:8b"), so the
+# quantization is pinned instead of depending on Ollama's default tag.
+LLM_MODEL = "llama3.1:8b-instruct-q4_K_M"
+# Untagged spelling accepted as an alias of LLM_MODEL.
+LLM_MODEL_ALIASES = ("llama3.1:8b",)
 # Base-paper Fig. 3 parity: evaluate augmentation generality across generators.
 BENCHMARK_GENERATORS = [LLM_MODEL]  # e.g. ["llama3.1:8b", "qwen3:14b", "deepseek-r1:8b"]
 LLM_TEMPERATURE = 0.1
@@ -354,6 +418,15 @@ domain knowledge to deliver comprehensive, accurate, and actionable answers.
 Clearly cite specific evidence from the context where applicable, and supplement
 with established medical knowledge when the context is incomplete.
 Be precise, thorough, and clinically rigorous."""
+
+# System prompt for any arm answering WITHOUT retrieved evidence: the
+# closed-book arm and HCAD-RAG when its gate abstains. Shared so both
+# no-evidence cases are prompted identically.
+NO_CONTEXT_SYSTEM_PROMPT = (
+    "You are a biomedical research assistant specializing in clinical medicine. "
+    "Use your expert clinical domain knowledge to deliver comprehensive, accurate, "
+    "and actionable answers. Be precise, thorough, and clinically rigorous."
+)
 
 # Vector Database
 CHROMA_COLLECTION_NAME = "biomedical_contexts"
@@ -480,17 +553,28 @@ def decision_gate_enabled() -> bool:
 # separated list of "provider:model" specs; the first entry is the primary
 # judge. The 70B judge is an optional API judge (NVIDIA NIM by default).
 # ---------------------------------------------------------------------------
-DEFAULT_JUDGE_ENSEMBLE = "ollama:gemma2:9b,ollama:qwen2.5:14b"
+# Explicit 4-bit tags (registry indices 5 and 3) - same weights as Ollama's
+# default "gemma2:9b" / "qwen2.5:14b" tags, but the quantization is pinned.
+DEFAULT_JUDGE_ENSEMBLE = ("ollama:gemma2:9b-instruct-q4_K_M,"
+                          "ollama:qwen2.5:14b-instruct-q4_K_M")
 OPTIONAL_API_JUDGE = "nvidia:meta/llama-3.3-70b-instruct"
 
 
 def judge_ensemble_specs() -> list[tuple[str, str]]:
     """Parsed judge ensemble: [(provider, model), ...] (primary first).
 
-    JUDGE_ENSEMBLE overrides the default local pair; JUDGE_ENABLE_API_JUDGE=1
-    appends the optional Llama-3.3-70B API judge.
+    Precedence: JUDGE_ENSEMBLE (explicit "provider:model" list) >
+    JUDGE_MODEL_INDEX (registry index/indices, quantized) > the default
+    local pair. JUDGE_ENABLE_API_JUDGE=1 appends the optional
+    Llama-3.3-70B API judge.
     """
-    raw = os.environ.get("JUDGE_ENSEMBLE", "").strip() or DEFAULT_JUDGE_ENSEMBLE
+    raw = os.environ.get("JUDGE_ENSEMBLE", "").strip()
+    if not raw:
+        # Notebook path: JUDGE_MODEL_INDEX ("2" or "0,3") -> quantized tags
+        # from the registry in src/judge_models.py.
+        from src.judge_models import resolve_judge_tags
+        tags = resolve_judge_tags()
+        raw = ",".join(f"ollama:{t}" for t in tags) if tags else DEFAULT_JUDGE_ENSEMBLE
     specs: list[tuple[str, str]] = []
     entries = [e.strip() for e in raw.split(",") if e.strip()]
     if os.environ.get("JUDGE_ENABLE_API_JUDGE", "0") == "1":

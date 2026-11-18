@@ -1,4 +1,4 @@
-"""Tests for the JUDGE_PROVIDER override in UnifiedLLMClient.
+﻿"""Tests for the JUDGE_PROVIDER override in UnifiedLLMClient.
 
 The hybrid mode: generator runs locally (ollama) while the judge uses a
 stronger remote provider (huggingface cloud / nvidia). The judge is
@@ -7,7 +7,7 @@ identified by constructing the client with JUDGE_HF_MODEL.
 
 import pytest
 
-from src.config import JUDGE_HF_MODEL, JUDGE_NVIDIA_MODEL, JUDGE_OLLAMA_MODEL
+from src.config import JUDGE_HF_MODEL, JUDGE_NVIDIA_MODEL, JUDGE_OLLAMA_MODEL, LLM_MODEL
 from src.core.llm_client import UnifiedLLMClient
 
 
@@ -27,7 +27,7 @@ def test_hybrid_judge_on_huggingface_generator_on_ollama(monkeypatch):
     assert judge.provider == "huggingface"
     assert judge.model == JUDGE_HF_MODEL  # Qwen/Qwen2.5-72B-Instruct
     assert generator.provider == "ollama"
-    assert generator.model == "llama3.1:8b"
+    assert generator.model == LLM_MODEL
 
 
 def test_no_override_judge_follows_llm_provider():
@@ -38,7 +38,7 @@ def test_no_override_judge_follows_llm_provider():
     # Whatever JUDGE_OLLAMA_MODEL the environment configured (default or .env).
     assert judge.model == JUDGE_OLLAMA_MODEL
     assert generator.provider == "ollama"
-    assert generator.model == "llama3.1:8b"
+    assert generator.model == LLM_MODEL
 
 
 def test_judge_provider_nvidia(monkeypatch):
@@ -70,4 +70,4 @@ def test_generator_untouched_by_judge_provider(monkeypatch):
     # Generator-style model names never trigger the judge override.
     generator = UnifiedLLMClient(model="llama3.1:8b")
     assert generator.provider == "ollama"
-    assert generator.model == "llama3.1:8b"
+    assert generator.model == LLM_MODEL

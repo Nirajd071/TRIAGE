@@ -8,6 +8,7 @@ from typing import Optional
 import requests
 
 from src.config import LLM_OLLAMA_TIMEOUT_S
+from src.judge_models import is_thinking_model
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ class UnifiedLLMClient:
         temperature: float = 0.1,
         max_tokens: int = 512,
         strict: bool = False,
+        is_judge: Optional[bool] = None,
     ):
         """
         Args:
@@ -39,13 +41,17 @@ class UnifiedLLMClient:
                 multi-judge ensemble are strict, so a missing API key or a
                 failed call surfaces as an error instead of silently scoring
                 with a different model under the wrong judge name.
+            is_judge: marks a judge client (larger num_ctx). Defaults to True
+                for the legacy JUDGE_HF_MODEL / "judge" aliases.
         """
         from src.config import (
             LLM_PROVIDER, LLM_HF_MODEL, JUDGE_HF_MODEL, JUDGE_OLLAMA_MODEL,
-            LLM_MODEL, HF_TOKEN,
+            LLM_MODEL, LLM_MODEL_ALIASES, HF_TOKEN,
         )
 
         self.strict = strict
+        self.is_judge = bool(is_judge) if is_judge is not None else (
+            model == JUDGE_HF_MODEL or model == "judge")
         self.last_usage: dict = {}
         self.provider = (provider or os.getenv("LLM_PROVIDER") or LLM_PROVIDER).lower()
         # Judge-specific provider override: run the generator fully local
@@ -61,9 +67,9 @@ class UnifiedLLMClient:
         self.token = os.getenv("HF_TOKEN") or HF_TOKEN
         self.ollama_model = (
             JUDGE_OLLAMA_MODEL
-            if model == JUDGE_HF_MODEL
+            if model in (JUDGE_HF_MODEL, "judge")
             else LLM_MODEL
-            if model is None or model in (LLM_MODEL, LLM_HF_MODEL)
+            if model is None or model in (LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
             else model
         )
 
@@ -73,7 +79,7 @@ class UnifiedLLMClient:
             self.nvidia_url = (os.getenv("NVIDIA_BASE_URL") or NVIDIA_BASE_URL).rstrip("/") + "/chat/completions"
             if model == JUDGE_HF_MODEL or model == "judge":
                 self.model = JUDGE_NVIDIA_MODEL
-            elif not model or model in (LLM_MODEL, LLM_HF_MODEL, "llama3.1:8b"):
+            elif not model or model in (LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES):
                 self.model = LLM_NVIDIA_MODEL
             else:
                 self.model = model
@@ -106,12 +112,21 @@ class UnifiedLLMClient:
         self.provider = "ollama"
         self.model = self.ollama_model
 
+    def _ollama_options(self, temp, tokens):
+        options = {"temperature": temp, "num_predict": tokens}
+        if self.is_judge:
+            # Pairwise prompts carry two answers + two evidence blocks; the
+            # small Ollama default context silently drops the instructions.
+            from src.config import JUDGE_NUM_CTX
+            options["num_ctx"] = JUDGE_NUM_CTX
+        return options
+
     def _chat_ollama(self, messages, temp, tokens, json_mode, model):
         import ollama
-        kwargs = {"options": {"temperature": temp, "num_predict": tokens}}
+        kwargs = {"options": self._ollama_options(temp, tokens)}
         if json_mode:
             kwargs["format"] = "json"
-        if model.startswith("qwen3:"):
+        if is_thinking_model(model):
             kwargs["think"] = False
         try:
             res = ollama.chat(model=model, messages=messages, **kwargs)
@@ -126,10 +141,14 @@ class UnifiedLLMClient:
         """Timeout-guarded HTTP call (the ollama pkg has no timeout kwarg)."""
         payload = {
             "model": model, "messages": messages, "stream": False,
-            "options": {"temperature": temp, "num_predict": tokens},
+            "options": self._ollama_options(temp, tokens),
         }
         if json_mode:
             payload["format"] = "json"
+        if is_thinking_model(model):
+            # qwen3 / deepseek-r1: without this the reply starts with a long
+            # <think> block that burns num_predict and breaks JSON parsing.
+            payload["think"] = False
         try:
             resp = requests.post(
                 "http://localhost:11434/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_S,
@@ -141,6 +160,47 @@ class UnifiedLLMClient:
         except Exception as e:
             logger.warning("Ollama HTTP call failed (%s); retrying via SDK.", e)
             return self._chat_ollama(messages, temp, tokens, json_mode, model)
+
+    def check_ready(self) -> None:
+        """Fail fast if this client cannot answer (benchmark preflight).
+
+        Without it, a judge that is not pulled or does not fit in memory
+        only shows up later as every judge call failing. Raises
+        RuntimeError with an actionable message.
+        """
+        if self.provider == "ollama":
+            try:
+                resp = requests.get("http://localhost:11434/api/tags", timeout=10)
+                resp.raise_for_status()
+                installed = {m.get("name") for m in resp.json().get("models", [])}
+            except Exception as e:
+                raise RuntimeError(
+                    f"Ollama server is not reachable on localhost:11434 ({e}). "
+                    "Start it (notebook: re-run the ollama cell) and retry."
+                ) from e
+            # Ollama reports untagged pulls as "<name>:latest".
+            wanted = {self.model, f"{self.model}:latest"}
+            if not wanted & installed:
+                raise RuntimeError(
+                    f"Model {self.model!r} is not pulled in Ollama. Run "
+                    f"`ollama pull {self.model}` (installed: "
+                    f"{', '.join(sorted(n for n in installed if n)) or 'none'})."
+                )
+        try:
+            reply = self.chat(
+                [{"role": "user", "content": 'Reply with exactly this JSON: {"ok": true}'}],
+                temperature=0.0, max_tokens=32, json_mode=True,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"{self.provider} model {self.model!r} failed a test call: {e}"
+            ) from e
+        if not (reply or "").strip():
+            raise RuntimeError(
+                f"{self.provider} model {self.model!r} returned an empty reply "
+                "to a test call (out of memory, or not loaded?). Check "
+                "`ollama ps` and /tmp/ollama.log."
+            )
 
     def chat(
         self,

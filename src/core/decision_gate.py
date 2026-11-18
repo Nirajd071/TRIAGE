@@ -1,9 +1,80 @@
 import os
 import logging
 from typing import Any, Dict, List, Optional, Tuple
-from src.config import EVIDENCE_WORD_BUDGET, MAX_EVIDENCE_ITEMS, MAX_EVIDENCE_PER_RELATION
+from src.config import (
+    EVIDENCE_WORD_BUDGET,
+    GROUP_MAX_TAILS,
+    MAX_EVIDENCE_ITEMS,
+    MAX_EVIDENCE_PER_RELATION,
+    MIN_CLIP_WORDS,
+    group_kg_facts_enabled,
+)
+from src.data.triple_text import TRIPLE_REL_MAP
 
 logger = logging.getLogger(__name__)
+
+# Sources whose items are single PrimeKG triples (n-ary facts have their own
+# multi-role rendering and are never merged).
+_TRIPLE_SOURCES = ("graph_hyperedge", "graph", "vector")
+_MAX_TRIPLE_WORDS = 40  # longer "vector" documents are prose chunks, not triples
+
+
+def _is_kg_triple(c: Dict[str, Any]) -> bool:
+    meta = c.get("metadata") or {}
+    if not (meta.get("head_name") and meta.get("tail_name") and meta.get("relation")):
+        return False
+    if c.get("source", "vector") not in _TRIPLE_SOURCES:
+        return False
+    return len(str(c.get("document") or "").split()) <= _MAX_TRIPLE_WORDS
+
+
+def group_kg_facts(items: List[Dict[str, Any]], max_tails: int = GROUP_MAX_TAILS
+                   ) -> List[Dict[str, Any]]:
+    """Merge KG triples that share (head, relation) into one hyperedge line.
+
+    "Metformin is indicated for A." + "Metformin is indicated for B." ->
+    "Metformin is indicated for: A; B."  The merged item takes the position
+    (and score) of the group's best member; prose and n-ary facts pass
+    through untouched. `member_documents` keeps each original triple so
+    gold matching and citation checks can still see individual facts.
+    """
+    out: List[Dict[str, Any]] = []
+    groups: Dict[tuple, Dict[str, Any]] = {}
+    for c in items:
+        if not _is_kg_triple(c):
+            out.append(c)
+            continue
+        meta = c["metadata"]
+        key = (meta["head_name"].strip().lower(), meta["relation"].strip().lower())
+        tail = meta["tail_name"].strip()
+        doc = str(c.get("document") or "").strip()
+        g = groups.get(key)
+        if g is None:
+            g = {**c, "metadata": dict(meta), "_tails": [tail], "member_documents": [doc]}
+            groups[key] = g
+            out.append(g)
+        elif len(g["_tails"]) < max_tails and tail.lower() not in {t.lower() for t in g["_tails"]}:
+            g["_tails"].append(tail)
+            g["member_documents"].append(doc)
+            if c.get("anchor"):
+                g["anchor"] = True
+    for g in groups.values():
+        tails = g.pop("_tails")
+        if len(tails) > 1:
+            meta = g["metadata"]
+            rel = TRIPLE_REL_MAP.get(meta["relation"], meta["relation"].replace("_", " "))
+            g["document"] = f"{meta['head_name']} {rel}: {'; '.join(tails)}."
+            g["metadata"]["grouped_tails"] = tails
+        else:
+            g.pop("member_documents", None)
+    return out
+
+
+def _clip_to_sentence(words: List[str], budget: int) -> str:
+    """First `budget` words, cut back to the last sentence boundary."""
+    text = " ".join(words[:budget])
+    cut = max(text.rfind(". "), text.rfind("! "), text.rfind("? "))
+    return (text if cut == -1 else text[: cut + 1]).strip()
 
 try:
     from typesafe_sdk import TypeSafeClient, Noul, Score, Choice
@@ -140,7 +211,9 @@ class DecisionGate:
 
         for c in candidates:
             score = c.get("phi_final", c.get("score", 0.0))
-            if score < self.min_relevance_score:
+            # Dense anchors were admitted on their full-text cosine; the
+            # hybrid floor would re-reject them for the missing-channel prior.
+            if score < self.min_relevance_score and not c.get("anchor"):
                 continue
 
             meta = c.get("metadata") or {}
@@ -161,7 +234,8 @@ class DecisionGate:
                 seen_docs.add(doc_key)
 
             relation = (meta.get("relation") or meta.get("display_relation") or "").strip().lower()
-            if relation and relation_counts.get(relation, 0) >= self.max_per_relation:
+            if (relation and not c.get("anchor")
+                    and relation_counts.get(relation, 0) >= self.max_per_relation):
                 deferred.append(c)
                 continue
             if relation:
@@ -169,28 +243,57 @@ class DecisionGate:
             primary.append(c)
 
         ordered = primary + deferred
+        if group_kg_facts_enabled():
+            ordered = group_kg_facts(ordered)
 
-        # Keep the combined prompt evidence within the configured word budget.
-        # budgets and floors are now hard invariants -
-        # (a) the FIRST (highest-scoring) candidate is clipped at a sentence
-        #     boundary instead of being skipped entirely, so top evidence is
-        #     never displaced by smaller low-value items;
-        # (b) the fallback admits only candidates above the configured
-        #     relevance floor (was a hardcoded 0.15 below the 0.25 default).
+        # Keep the combined prompt evidence within the configured word budget
+        # (the same EVIDENCE_WORD_BUDGET the vanilla arm gets). An item that
+        # does not fit is clipped at a sentence boundary when a useful amount
+        # of budget remains - the vanilla arm's rule - instead of being
+        # dropped: previously only the FIRST item could be clipped, so a
+        # relevant 200-word passage ranked behind a few triples vanished.
+        # Short items further down may still fill what is left.
+        #
+        # Dense anchors are guaranteed a slot and their words (up to the
+        # budget) are reserved up front, but they keep their score position:
+        # a higher-scoring structured item still comes first.
+        budget = self.token_budget_words
+        reservation: Dict[int, int] = {}   # id(anchor item) -> reserved words
+        for c in ordered:
+            if c.get("anchor") and len(reservation) < self.max_evidence_items:
+                n = len(str(c.get("document") or "").split())
+                reservation[id(c)] = min(n, max(0, budget - sum(reservation.values())))
+        reserved_words = sum(reservation.values())
+        reserved_slots = len(reservation)
+
         bounded = []
-        remaining_words = self.token_budget_words
-        for idx, candidate in enumerate(ordered):
-            if len(bounded) >= self.max_evidence_items:
+        remaining_words = budget
+        for candidate in ordered:
+            if len(bounded) >= self.max_evidence_items or remaining_words <= 0:
                 break
             doc = str(candidate.get("document") or "").strip()
             words = doc.split()
-            if len(words) <= remaining_words:
+            if not words:
+                continue
+            is_anchor = id(candidate) in reservation
+            if is_anchor:
+                reserved_words -= reservation.pop(id(candidate))
+                reserved_slots -= 1
+                available, slots_free = remaining_words, True
+            else:
+                available = remaining_words - reserved_words
+                slots_free = len(bounded) + reserved_slots < self.max_evidence_items
+            if not slots_free or available <= 0:
+                continue
+            if len(words) <= available:
                 bounded.append(candidate)
                 remaining_words -= len(words)
-            elif idx == 0 and words:
-                # clip the top candidate at the budget instead of dropping it
-                bounded.append({**candidate, "document": " ".join(words[: self.token_budget_words])})
-                remaining_words = 0
+            elif not bounded or is_anchor or available >= MIN_CLIP_WORDS:
+                clipped = _clip_to_sentence(words, available)
+                if not clipped:
+                    continue
+                bounded.append({**candidate, "document": clipped})
+                remaining_words -= len(clipped.split())
         verified = bounded
 
         if not verified and candidates:

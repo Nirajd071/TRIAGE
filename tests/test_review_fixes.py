@@ -102,7 +102,9 @@ class TestConfig:
     def test_default_judge_ensemble(self, monkeypatch):
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
-        assert judge_ensemble_specs() == [("ollama", "gemma2:9b"), ("ollama", "qwen2.5:14b")]
+        monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
+        assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q4_K_M"),
+                                          ("ollama", "qwen2.5:14b-instruct-q4_K_M")]
 
     def test_optional_api_judge(self, monkeypatch):
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
@@ -568,13 +570,18 @@ def test_cli_exposes_revision_commands():
 
 
 def test_resume_reruns_legacy_or_incompatible_records(tmp_path):
-    from src.evaluation.run_base_paper_benchmark import _completed_questions_from_checkpoint
+    from src.evaluation.run_base_paper_benchmark import (
+        _completed_questions_from_checkpoint, _hcad_config_id)
 
     ckpt = tmp_path / "c.jsonl"
-    base = {"question_pool": "test", "question_set_id": "s"}
+    base = {"question_pool": "test", "question_set_id": "s",
+            "hcad_config_id": _hcad_config_id()}
     rows = [
         {**base, "question": "legacy"},                                   # schema 1
         {**base, "question": "ok", "schema": 2,
+         "arms": {"closed_book": "", "dense": "", "hcad": ""}, "judges": ["j1", "j2"]},
+        {"question_pool": "test", "question_set_id": "s",                 # old evidence logic
+         "question": "old_hcad_config", "schema": 2,
          "arms": {"closed_book": "", "dense": "", "hcad": ""}, "judges": ["j1", "j2"]},
         {**base, "question": "fewer_arms", "schema": 2,
          "arms": {"hcad": ""}, "judges": ["j1", "j2"]},
@@ -587,4 +594,4 @@ def test_resume_reruns_legacy_or_incompatible_records(tmp_path):
         required_judges=["j1", "j2"])
     assert done == {"ok"}
     # legacy call signature keeps its old behaviour
-    assert len(_completed_questions_from_checkpoint(ckpt, "test", "s")) == 4
+    assert len(_completed_questions_from_checkpoint(ckpt, "test", "s")) == 5

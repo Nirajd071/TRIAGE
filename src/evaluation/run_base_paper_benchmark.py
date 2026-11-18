@@ -159,6 +159,22 @@ def _validate_generated_response(system_name: str, response: str) -> str:
         raise RuntimeError(f"{system_name} generation failed: {cleaned}")
     return cleaned
 
+_ARM_CITATION_TAG = re.compile(r"\[(?:Evidence|Context)(\s*\d[\d,\s\-–]*)\]")
+
+
+def _blind_citation_tags(response: str) -> str:
+    """Rewrite arm-specific citation tags to the judge's neutral [Doc i] tags.
+
+    Dense/BM25/hybrid answers cite [Context i] and HCAD answers cite
+    [Evidence i]; the judge sees every evidence block tagged [Doc i]. Left
+    as-is, the tag word reveals which system wrote an answer (unblinding the
+    pairwise judge). Indices are unchanged, so [Doc i] still points at the
+    same item. Applied only to judge inputs; citation precision is computed
+    on the raw response.
+    """
+    return _ARM_CITATION_TAG.sub(r"[Doc\1]", response)
+
+
 def _format_retrieved_evidence(contexts: List[Dict[str, Any]], tag: str) -> str:
     """Expose answer-specific retrieval evidence to the judge with a word cap."""
     if not contexts:
@@ -231,10 +247,15 @@ def _ranked_relevance(
     if not ref_tokens:
         return [0] * len(contexts)
     for context in contexts:
-        doc_tokens = _content_tokens(_context_document(context))
-        union = len(ref_tokens | doc_tokens)
-        overlap = len(ref_tokens & doc_tokens) / union if union else 0.0
-        relevance.append(1 if overlap >= overlap_threshold else 0)
+        # A grouped hyperedge line ("X is indicated for: A; B; C.") contains
+        # several triples; it is relevant when any member fact matches.
+        texts = [_context_document(context)] + list(context.get("member_documents") or [])
+        best = 0.0
+        for text in texts:
+            doc_tokens = _content_tokens(text)
+            union = len(ref_tokens | doc_tokens)
+            best = max(best, len(ref_tokens & doc_tokens) / union if union else 0.0)
+        relevance.append(1 if best >= overlap_threshold else 0)
     return relevance
 
 #: Legacy (schema-1, three-arm) selection keys -> (arm_a, arm_b).
@@ -302,16 +323,71 @@ def _normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
     return rec
 
 
+def _evidence_stats(contexts: List[Dict[str, Any]], relevance: List[int]) -> Dict[str, Any]:
+    """What an arm actually handed the generator (diagnostics only).
+
+    Counts words within the shared EVIDENCE_WORD_BUDGET, prose vs KG items,
+    and the rank of the first gold-matching item - the numbers needed to
+    tell an evidence-selection loss from a generation/judging effect.
+    """
+    words, n_prose, n_kg = 0, 0, 0
+    for context in contexts:
+        text = _context_document(context)
+        if words < EVIDENCE_WORD_BUDGET:
+            words += min(len(text.split()), EVIDENCE_WORD_BUDGET - words)
+        meta = context.get("metadata") or {}
+        if meta.get("relation") or context.get("source") in ("graph_hyperedge", "nary_fact"):
+            n_kg += 1
+        else:
+            n_prose += 1
+    gold_rank = next((i + 1 for i, r in enumerate(relevance) if r), None)
+    return {"n_items": len(contexts), "n_prose": n_prose, "n_kg": n_kg,
+            "words": words, "gold_rank": gold_rank,
+            "n_kg_facts": sum(len((c.get("metadata") or {}).get("grouped_tails") or [None])
+                              for c in contexts
+                              if (c.get("metadata") or {}).get("relation"))}
+
+
+def _hcad_config_id() -> str:
+    """Fingerprint of the HCAD evidence-assembly settings.
+
+    HCAD answers produced under different evidence logic must not be
+    resumed into (or averaged with) the current run. Ablation arms are
+    expressed through the same env toggles inside their own scope, so the
+    fingerprint is taken from the process-level (full-system) settings.
+    """
+    from src.config import dense_anchor_k, dense_anchor_min, dense_weight, group_kg_facts_enabled
+    return (f"evidence-v2|dw={dense_weight():g}|anchor={dense_anchor_k()}"
+            f"@{dense_anchor_min():g}|group={int(group_kg_facts_enabled())}")
+
+
+def _config_matches(record: Dict[str, Any],
+                    required_judges: Optional[Sequence[str]]) -> bool:
+    """A record counts only for the judge panel AND HCAD config that made it.
+
+    Switching JUDGE_MODEL_INDEX (or the HCAD evidence settings) and
+    re-running must NOT resume or aggregate another configuration's scores.
+    Inactive (always True) when ``required_judges`` is None.
+    """
+    if required_judges is None:
+        return True
+    return (list(record.get("judges") or []) == list(required_judges)
+            and record.get("hcad_config_id") == _hcad_config_id())
+
+
 def _records_from_checkpoint(
     checkpoint_path: Path, sample_questions: set, question_pool: Optional[str] = None,
     question_set_id: Optional[str] = None,
+    required_judges: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Load the newest per-question record for every question in this run.
 
     Aggregating from the checkpoint (not session memory) keeps resumed runs
     correct: questions evaluated before the interruption keep their records,
     and stale questions from older runs with different sample sets are
-    filtered out. Records are normalised to schema 2 on read.
+    filtered out. With ``required_judges``, only records of exactly that
+    judge panel and the current HCAD config are used. Records are
+    normalised to schema 2 on read.
     """
     by_question: Dict[str, Dict[str, Any]] = {}
     if checkpoint_path.exists():
@@ -326,8 +402,9 @@ def _records_from_checkpoint(
                 if (record.get("question") in sample_questions
                         and (question_pool is None
                              or record.get("question_pool") == question_pool)):
-                    if (question_set_id is None
-                            or record.get("question_set_id") == question_set_id):
+                    if ((question_set_id is None
+                            or record.get("question_set_id") == question_set_id)
+                            and _config_matches(record, required_judges)):
                         by_question[record["question"]] = _normalize_record(record)  # later lines win
 
     labels = list(ARM_LABELS.values())
@@ -494,8 +571,8 @@ def _completed_questions_from_checkpoint(
                         if required_arms is not None and not set(required_arms) <= set(
                                 (record.get("arms") or {}).keys()):
                             continue
-                        if required_judges is not None and list(
-                                record.get("judges") or []) != list(required_judges):
+                        if required_judges is not None and not _config_matches(
+                                record, required_judges):
                             continue
                     completed.add(record["question"])
     return completed
@@ -1225,6 +1302,13 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
     judge_names = judge.judge_names
     logger.info("Arms: %s", [ARM_LABELS[a] for a in arm_ids])
     logger.info("Judges: %s", judge_names)
+    # Fail before hours of retrieval/generation when a judge is not pulled,
+    # does not fit in memory, or cannot produce JSON.
+    if os.getenv("JUDGE_SKIP_PREFLIGHT", "0") != "1" and hasattr(judge, "check_ready"):
+        judge.check_ready()
+    from src.config import JUDGE_MAX_FAILURE_RATE
+    hcad_config_id = _hcad_config_id()
+    logger.info("HCAD evidence config: %s", hcad_config_id)
 
     systems = built_arms or build_arms(arm_ids)
     hcad_retriever = getattr(systems.get("hcad"), "_retriever", None)
@@ -1285,26 +1369,32 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
             logger.info("  %-40s t_ret=%.3fs t_gen=%.2fs ctx=%d", arm.label,
                         lat["t_retrieval"], gen_stats["t_generation"], lat["n_contexts"])
 
+        # Judge inputs use neutral [Doc i] citation tags for every arm (blind
+        # judging); raw answers are kept for citation precision below.
+        judge_answers = {a: _blind_citation_tags(answers[a]) for a in arm_ids}
         scores = {
-            ARM_LABELS[a]: judge.evaluate_scoring(q, answers[a], ref,
+            ARM_LABELS[a]: judge.evaluate_scoring(q, judge_answers[a], ref,
                                                   answer_evidence=evidence[a])
             for a in arm_ids
         }
         selection = {
             comparison_key(a, b): judge.evaluate_selection(
-                q, answers[a], answers[b], ref, label_a=ARM_LABELS[a], label_b=ARM_LABELS[b],
+                q, judge_answers[a], judge_answers[b], ref,
+                label_a=ARM_LABELS[a], label_b=ARM_LABELS[b],
                 evidence_a=evidence[a], evidence_b=evidence[b])
             for a, b in pairs
         }
 
         sample_retrieval: Dict[str, Dict[str, float]] = {}
         sample_citations: Dict[str, Dict[str, Any]] = {}
+        sample_evidence: Dict[str, Dict[str, Any]] = {}
         for arm_id in arm_ids:
             if systems[arm_id].retrieve is None:
                 continue
             label, contexts = ARM_LABELS[arm_id], contexts_by_arm[arm_id]
+            relevance = _ranked_relevance(ref, contexts)
+            sample_evidence[label] = _evidence_stats(contexts, relevance)
             if sample.get("source") == "paper_protocol":
-                relevance = _ranked_relevance(ref, contexts)
                 sample_retrieval[label] = {
                     "ndcg_at_k": round(ndcg_at_k(relevance, k=RETRIEVAL_K), 4),
                     "recall_at_k": round(recall_at_k(relevance, k=RETRIEVAL_K), 4),
@@ -1325,6 +1415,7 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
                 "question_set_id": question_set_id,
                 "arms": {a: ARM_LABELS[a] for a in arm_ids},
                 "judges": judge_names,
+                "hcad_config_id": hcad_config_id,
                 "grounded_mode": "grounded" if hcad_contexts else "parametric",
                 "n_hcad_contexts": len(hcad_contexts),
                 "answers": {ARM_LABELS[a]: answers[a] for a in arm_ids},
@@ -1332,6 +1423,7 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
                 "selection": selection,
                 "latency": latency,
                 "retrieval": sample_retrieval,
+                "evidence": sample_evidence,
                 "citations": sample_citations,
             }) + "\n")
 
@@ -1339,11 +1431,51 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
         if checkpoint_upload_every > 0 and evaluated_this_session % checkpoint_upload_every == 0:
             upload_checkpoint_artifact([checkpoint_path, question_cache_path])
 
+        # Abort when a judge is broken (OOM, timeouts, unparseable JSON): its
+        # verdicts are missing, so the run would measure nothing for it. Two
+        # questions are enough to tell that from an occasional bad reply.
+        calls = getattr(judge, "calls", None) or {}
+        for name in judge_names:
+            if not calls.get(name):
+                continue
+            rate = judge.failure_rate(name)
+            logger.info("  Judge %s failures this session: %d/%d (%.0f%%)", name,
+                        judge.failures.get(name, 0), calls[name], 100 * rate)
+            if evaluated_this_session >= 2 and rate > JUDGE_MAX_FAILURE_RATE:
+                raise RuntimeError(
+                    f"Judge {name} failed {judge.failures.get(name, 0)}/{calls[name]} "
+                    f"evaluations (> {JUDGE_MAX_FAILURE_RATE:.0%}). Aborting: its "
+                    "verdicts would be missing, not judgments. Check the WARNING "
+                    "lines above (unparseable JSON -> pick another judge index; "
+                    "timeouts / empty replies -> GPU memory, see `ollama ps`). "
+                    "Checkpointed questions are kept and will resume."
+                )
+
     records = _records_from_checkpoint(
         checkpoint_path, {s["question"] for s in samples}, question_pool=question_pool,
-        question_set_id=question_set_id,
+        question_set_id=question_set_id, required_judges=judge_names,
     )
     aggregates = aggregate_results(records, arm_ids, judge_names)
+
+    # Evidence diagnostics: what each retrieval arm fed the generator,
+    # averaged over the questions whose records carry it.
+    evidence_diagnostics: Dict[str, Any] = {}
+    for arm_id in arm_ids:
+        label = ARM_LABELS[arm_id]
+        rows = [rec["evidence"][label] for rec in records["per_question"]
+                if isinstance(rec.get("evidence"), dict) and label in rec["evidence"]]
+        if not rows:
+            continue
+        evidence_diagnostics[label] = {
+            "n_questions": len(rows),
+            **{f"mean_{key}": round(sum(r[key] for r in rows) / len(rows), 2)
+               for key in ("n_items", "n_prose", "n_kg", "n_kg_facts", "words")},
+            "gold_in_evidence_rate": round(
+                sum(1 for r in rows if r["gold_rank"] is not None) / len(rows), 3),
+            "gold_at_rank1_rate": round(
+                sum(1 for r in rows if r["gold_rank"] == 1) / len(rows), 3),
+        }
+    from src.config import dense_anchor_k, dense_anchor_min, dense_weight, group_kg_facts_enabled
     from src.config import ENABLE_FEW_SHOT
 
     summary_results = {
@@ -1354,6 +1486,18 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
             "ablation_env": {a: ABLATION_ENV[a] for a in arm_ids if a in ABLATION_ENV},
             "generator": {"model": LLM_MODEL, "label": BASELINE_LABEL},
             "judges": judge.manifest(),
+            "judge_selection": {
+                "model_index": os.environ.get("JUDGE_MODEL_INDEX") or None,
+                "quant": os.environ.get("JUDGE_QUANT") or None,
+                "ensemble_env": os.environ.get("JUDGE_ENSEMBLE") or None,
+            },
+            "hcad_evidence_config": {
+                "config_id": hcad_config_id,
+                "dense_weight": dense_weight(),
+                "dense_anchor_k": dense_anchor_k(),
+                "dense_anchor_min": dense_anchor_min(),
+                "group_kg_facts": group_kg_facts_enabled(),
+            },
             "judge_json_mode": True,
             "latency_timed_runs": latency_runs,
             "bootstrap_resamples": BOOTSTRAP_RESAMPLES,
@@ -1365,6 +1509,7 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
             "tensor_mode": os.environ.get("HCAD_TENSOR_MODE", "static"),
         },
         **aggregates,
+        "evidence_diagnostics": evidence_diagnostics,
         # counted from the de-duplicated newest record per question
         "grounded_mode": {
             mode: sum(1 for rec in records["per_question"] if rec.get("grounded_mode") == mode)

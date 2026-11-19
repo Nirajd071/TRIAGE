@@ -128,11 +128,15 @@ class UnifiedLLMClient:
             kwargs["format"] = "json"
         if is_thinking_model(model):
             kwargs["think"] = False
+        # Bounded call: the module-level ollama.chat has no timeout at all.
+        _client_cls = getattr(ollama, "Client", None)
+        _chat = (_client_cls(timeout=OLLAMA_TIMEOUT_S).chat
+                 if _client_cls is not None else ollama.chat)
         try:
-            res = ollama.chat(model=model, messages=messages, **kwargs)
+            res = _chat(model=model, messages=messages, **kwargs)
         except TypeError:
             kwargs.pop("think", None)
-            res = ollama.chat(model=model, messages=messages, **kwargs)
+            res = _chat(model=model, messages=messages, **kwargs)
         raw = res if isinstance(res, dict) else getattr(res, "__dict__", {})
         self.last_usage = _ollama_usage(raw)
         return res.message.content or ""
@@ -157,6 +161,12 @@ class UnifiedLLMClient:
             data = resp.json()
             self.last_usage = _ollama_usage(data)
             return data.get("message", {}).get("content", "") or ""
+        except requests.Timeout as e:
+            # The server is still busy with this request (NUM_PARALLEL=1);
+            # re-sending it via the SDK would queue the same work twice.
+            raise RuntimeError(
+                f"Ollama call to {model!r} timed out after {OLLAMA_TIMEOUT_S:.0f} s"
+            ) from e
         except Exception as e:
             logger.warning("Ollama HTTP call failed (%s); retrying via SDK.", e)
             return self._chat_ollama(messages, temp, tokens, json_mode, model)

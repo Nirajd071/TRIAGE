@@ -358,7 +358,10 @@ def decoupler_cache_enabled() -> bool:
     return os.environ.get("HCAD_DECOUPLER_CACHE", default) == "1"
 
 # LLM
-LLM_OLLAMA_TIMEOUT_S = 120.0
+# Per-call ollama timeout. 120 s was too tight on a Kaggle T4: a 14B judge
+# that must first reload from disk and then read a 4-6k token pairwise
+# prompt can exceed it, and every timeout counts as a judge failure.
+LLM_OLLAMA_TIMEOUT_S = float(os.getenv("LLM_OLLAMA_TIMEOUT_S", "600"))
 
 # Graph Expansion
 GRAPH_HOP_DEPTH = 2

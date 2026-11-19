@@ -32,6 +32,7 @@ from typing import Any
 
 from src.config import (
     LLM_MODEL,
+    LLM_OLLAMA_TIMEOUT_S,
     LLM_TEMPERATURE,
     NEGATION_CUES,
     RELATION_TYPES,
@@ -451,7 +452,7 @@ class RelationExtractor:
                     "temperature": LLM_TEMPERATURE,
                     "stream": False,
                 },
-                timeout=60,
+                timeout=LLM_OLLAMA_TIMEOUT_S,
             )
             response.raise_for_status()
             result = response.json().get("response", "")

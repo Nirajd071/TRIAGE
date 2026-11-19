@@ -4,7 +4,8 @@ from typing import Optional
 
 import requests
 
-from src.config import LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, NO_CONTEXT_SYSTEM_PROMPT
+from src.config import (LLM_MODEL, LLM_TEMPERATURE, LLM_MAX_TOKENS, LLM_OLLAMA_TIMEOUT_S,
+                        NO_CONTEXT_SYSTEM_PROMPT)
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +157,7 @@ class BaselineLLM:
             resp = requests.post(
                 OLLAMA_GENERATE_ENDPOINT,
                 json=payload,
-                timeout=120,
+                timeout=LLM_OLLAMA_TIMEOUT_S,
             )
             resp.raise_for_status()
         except requests.ConnectionError as exc:

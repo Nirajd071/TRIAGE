@@ -25,6 +25,7 @@ CLI:  python -m src.evaluation.hallucination_evaluator --system hcad --n 200
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -202,19 +203,34 @@ class HallucinationEvaluator:
                     done[row["sample_index"]] = row
         ckpt = open(ckpt_path, "a", encoding="utf-8")
 
+        # Bounded calls: the module-level ollama.chat has NO timeout, so a
+        # stalled server would hang the (paid) GPU session indefinitely.
+        from src.config import LLM_OLLAMA_TIMEOUT_S
+        _client_cls = getattr(ollama, "Client", None)
+        _chat = (_client_cls(timeout=LLM_OLLAMA_TIMEOUT_S).chat
+                 if _client_cls is not None else ollama.chat)
+
         def classify(question: str, answer: str, knowledge: str, sample_index: int) -> bool:
             messages = builder.build_hallucination_prompt(question, answer, knowledge)
-            try:
-                response = ollama.chat(
-                    model=model_name,
-                    messages=messages,
-                    options={"temperature": 0.0, "num_predict": 8},
-                )
-                prediction = response.message.content.strip().upper().rstrip(".!")
-            except Exception as exc:
+            last_exc = None
+            for attempt in range(3):  # transient errors must not kill a 200-sample run
+                try:
+                    response = _chat(
+                        model=model_name,
+                        messages=messages,
+                        options={"temperature": 0.0, "num_predict": 8},
+                    )
+                    prediction = response.message.content.strip().upper().rstrip(".!")
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning("MedHallu classifier call failed for sample %d "
+                                   "(attempt %d/3): %s", sample_index, attempt + 1, exc)
+                    time.sleep(5 * (attempt + 1))
+            else:
                 raise RuntimeError(
-                    f"MedHallu classifier failed for sample {sample_index}: {exc}"
-                ) from exc
+                    f"MedHallu classifier failed for sample {sample_index}: {last_exc}"
+                ) from last_exc
 
             label = parse_hallucination_label(prediction)
             if label is None:

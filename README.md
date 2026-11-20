@@ -4,44 +4,141 @@
 A novel Retrieval-Augmented Generation framework that represents clinical semantics through Entity–Relation–Modifier (E/R/M) channels. Relation and modifier embeddings are partially decorrelated from the entity embedding using soft modified Gram–Schmidt orthogonalization (blend factor 0.70); the resulting channels are not guaranteed to be mutually orthogonal. It applies graph-topology anisotropic transformations, adaptive statistical Heaviside filtering, and a calibrated JEV System One decision gate to address context distraction and hallucination risk in medical LLMs.
 
 ---
-## Key Innovations
-1. **Semantic Decoupling**: Represents each medical statement as a 3×d matrix $X_{\text{HCAD}} = [E; R; M]$ instead of a flat 1×d vector. Soft modified Gram–Schmidt orthogonalization (blend factor $\eta = 0.70$) partially decorrelates the relation and modifier embeddings from the entity embedding. The channels are not guaranteed to be mutually orthogonal; a query-independent anchor is used when a residual becomes degenerate.
-2. **Hybrid Decoupled Scoring**: Ranks candidates by $\Phi = w_d \cdot \cos(q, c) + (1 - w_d) \cdot \Phi_{\text{struct}}$, fusing the full-text dense match with the presence-masked Entity/Relation/Modifier channel score. The legacy topology-block weighting $W_A$ (node degree, edge confidence, IDF) remains available as an ablation (`HCAD_ANISO_DIM_WEIGHTING=1`); a query-adaptive channel-weight adapter can be trained on the dev pool (`train-tensor`, `HCAD_TENSOR_MODE=learned`).
-3. **Adaptive Heaviside Filtering**: Replaces rigid Top-K retrieval with a dual-gated dynamic threshold:
-   $$\mathcal{M}_{\text{HCAD}}(t_i) = \Theta(\Phi_{\text{Final}}(t_i) - (\mu + k\sigma))$$
-4. **JEV System One Decision Gate**: Employs an intelligent decision gate (`typesafe-sdk`) to evaluate factual groundedness and prune irrelevant or ungrounded context before prompt assembly, preventing token bloat and hallucination injection.
-5. **Bidirectional Hypergraph Expansion**: Discovers high-order biomedical relations and therapy associations from PrimeKG using multi-hop neighborhood hyperedges.
----
-## Architecture
+## Mechanism
+
+HCAD-RAG answers a clinical query in five stages. Stages 1–4 select the
+evidence; stage 5 is generation. Every arm of the benchmark (closed-book,
+BM25, dense, hybrid, HCAD) uses the same generator, the same synthesis
+instructions and the same **350-word evidence budget**, so arms differ
+only in *which* evidence they hand the generator.
+
+### 1. Query understanding
+- **Biomedical NER** (SciSpacy BC5CDR + JNLPBA, plus regex rules) finds drugs,
+  diseases, genes and proteins.
+- **Entity linking**: SapBERT embeddings + a FAISS cosine index map each
+  mention to a PrimeKG node.
+- **Relation and modifier extraction** (rule-based) detects the clinical
+  predicate (treats, contraindicated, interacts with, …) and modifiers,
+  including negation cues ("not recommended", "contraindicated", …).
+  Query relations are mapped onto PrimeKG's canonical relation vocabulary
+  (`HCAD_RELATION_VOCAB=1`).
+
+### 2. Candidate pool (≤ 80 candidates)
+Three channels are pooled:
+- **Dense passages**: nearest neighbours of the full query in the Chroma
+  vector store (S-PubMedBERT, cosine): PMC clinical text and rendered PrimeKG facts.
+- **Hyperedge triples**: bidirectional, relation-typed hyperedges around every
+  linked entity in the PrimeKG graph (up to 12 triples per entity, ≤ 3 per
+  hyperedge, members ordered by the `soft` inverse-log-degree rule so hub
+  nodes do not crowd out specific facts).
+- **N-ary facts**: the fact hypergraph groups triples that share a tail into
+  multi-entity clinical facts (≤ 10 per query).
+
+### 3. Semantic decoupling and hybrid scoring
+- Each statement is represented as a 3×d matrix $X_{\text{HCAD}} = [E; R; M]$
+  (entity, relation, modifier) instead of one flat vector. Soft modified
+  Gram–Schmidt (blend $\eta = 0.70$) partially decorrelates R and M from E.
+  The channels are not guaranteed to be mutually orthogonal. A
+  query-independent anchor replaces a degenerate residual, and channels
+  absent from a candidate are masked (`HCAD_PRESENCE_MASKING=1`).
+- Candidates are ranked by the hybrid score
+  $$\Phi = w_d \cdot \cos(q, c) + (1 - w_d) \cdot \Phi_{\text{struct}}, \qquad w_d = 0.5$$
+  This fuses the full-text dense match with the presence-masked E/R/M channel score.
+  The legacy topology-block weighting $W_A$ (node degree, edge confidence,
+  IDF) is an ablation (`HCAD_ANISO_DIM_WEIGHTING=1`). A query-adaptive
+  channel-weight adapter can be trained on the dev pool (`train-tensor`,
+  `HCAD_TENSOR_MODE=learned`).
+
+### 4. Gated evidence selection
+- **Adaptive Heaviside filter (two gates)**: an absolute floor
+  $\Phi \ge 0.10$, then a dynamic threshold
+  $$\mathcal{M}_{\text{HCAD}}(t_i) = \Theta(\Phi(t_i) - (\mu + k\sigma))$$
+  with an optional saturation cap $\tau_{sat}$ calibrated on the dev pool.
+  If nothing survives, HCAD **abstains** and answers with exactly the
+  closed-book arm's no-evidence prompt.
+- **Dense anchor** *(this branch)*: the best full-text dense passage
+  (cosine ≥ 0.40) is always admitted. It keeps its Φ position, but the gate
+  reserves a slot and its words. Reason: the E/R/M channels compare short
+  extracted fragments, so long prose passages, which have no entity or
+  relation metadata, were out-ranked by short KG triples. The passage that
+  best matches the whole question could be gated out entirely while dense
+  RAG kept it. HCAD's evidence is now "best dense passage +
+  structure-selected complement", so the comparison against dense RAG
+  isolates what structured selection adds. `HCAD_DENSE_ANCHOR_K=0` restores
+  the old behaviour.
+- **JEV System One decision gate** (`typesafe-sdk`; local calibrated mode
+  without `TYPESAFE_API_KEY`):
+  - drops candidates below relevance 0.25 (anchors are exempt);
+  - allows at most 3 items per relation type, so one relation cannot fill the context;
+  - keeps at most 8 items and 350 words.
+- **Hyperedge rendering** *(this branch)*: KG triples that share
+  (head, relation) are emitted as ONE line, e.g. "Metformin is indicated for: A; B;
+  C." (≤ 5 tails), instead of repeating head + verb per triple. This fits about
+  3× more facts into the same word budget. `HCAD_GROUP_FACTS=0` restores one line per triple.
+- **Clip, don't drop** *(this branch)*: an item that does not fit the
+  remaining budget is clipped at a sentence boundary, as the dense arm
+  does, when ≥ 25 words remain. Previously only the first item could be
+  clipped, and a relevant passage behind a few triples was discarded whole.
+
+### 5. Generation
+A structured prompt lists the evidence as `[Evidence i]` blocks with source
+and relevance and is sent to Llama-3.1-8B-Instruct (4-bit,
+`llama3.1:8b-instruct-q4_K_M`). The instructions are the same shared
+`synthesis_instructions` every arm gets.
+
 ```
 Clinical Query
       │
       ▼
-Biomedical NER (SciSpacy / SapBERT) ──► Entity Linking (PrimeKG)
-      │                                       │
-      ▼                                       ▼
-Relation & Modifier Extraction        Hyperedge Construction & Expansion
-      │                                       │
-      ▼                                       ▼
-Semantic Decoupling (3×768 Matrix)    Candidate Context Pool
-      │                                       │
-      └──────────────────┬────────────────────┘
-                         │
-                         ▼
-        Anisotropic Transformation & Tensor Scoring
-                         │
-                         ▼
-       Adaptive Statistical Filter (Heaviside Gate)
-                         │
-                         ▼
-       JEV System One Decision Gate (Groundedness Verification)
-                         │
-                         ▼
-        Structured Clinical Prompt Construction
-                         │
-                         ▼
-        Clinical LLM (Llama-3.1-8B-Instruct) ──► Verified Clinical Synthesis
+Biomedical NER (SciSpacy) ──► SapBERT Entity Linking (PrimeKG)
+      │                                │
+      ▼                                ▼
+Relation & Modifier Extraction   Dense passages + Hyperedge triples + N-ary facts
+      │                                │
+      ▼                                ▼
+Semantic Decoupling [E;R;M]      Candidate Pool (≤ 80)
+      └───────────────┬────────────────┘
+                      ▼
+        Hybrid score Φ = w_d·dense + (1−w_d)·E/R/M
+                      ▼
+        Heaviside filter (floor + μ+kσ)  ──►  abstain if empty
+                      ▼
+        + Dense anchor (best full-text passage, reserved slot)
+                      ▼
+        JEV Decision Gate (relevance, relation cap, 8 items)
+                      ▼
+        Evidence assembly: hyperedge grouping, 350-word budget, clip-not-drop
+                      ▼
+        Llama-3.1-8B-Instruct (4-bit) ──► cited clinical answer
 ```
+
+### Evaluation fairness (judge side)
+- The judge sees each answer's own evidence under neutral `[Doc i]` tags.
+  The arm-specific citation tags in the answers (`[Evidence i]` /
+  `[Context i]`) are rewritten to `[Doc i]` before scoring, so the judge
+  cannot tell which system wrote an answer. Citation precision is still
+  computed on the raw answers.
+- The closed-book arm and an abstaining HCAD share one no-evidence system
+  prompt (`NO_CONTEXT_SYSTEM_PROMPT`).
+- Pairwise comparisons run in both orders (AB + BA); a criterion keeps its
+  winner only when both orders agree.
+- Every evidence block shown to the judge is clipped at a sentence boundary
+  within the same 350-word budget.
+
+### Evidence diagnostics
+Each checkpoint record stores, per retrieval arm, what was actually handed
+to the generator. The fields are item count, prose vs KG items, KG facts,
+words used and the rank of the gold source chunk. The results JSON
+aggregates them in `evidence_diagnostics`
+(`gold_in_evidence_rate`, `gold_at_rank1_rate`, `mean_words`, …). If HCAD
+trails dense RAG, these numbers tell an evidence-selection loss apart from
+a generation or judging effect.
+
+> The evidence-assembly changes target the observed HCAD < dense-RAG gap.
+> They are not yet validated by a benchmark run. In particular, the 0.40
+> anchor floor is a prior, not a tuned value. Compare `evidence_diagnostics`
+> and the rubric scores against a `HCAD_DENSE_ANCHOR_K=0 HCAD_GROUP_FACTS=0`
+> run before claiming an improvement.
 ---
 ## Quick Start
 
@@ -66,10 +163,11 @@ pip install --no-deps https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/release
 Use the repository-root `.env` as the single local environment file — copy
 `.env.example` and keep one profile:
 - **Profile A (all LLMs local via ollama, zero LLM API keys):**
-  `LLM_PROVIDER=ollama` + `JUDGE_OLLAMA_MODEL=qwen2.5:14b`. Generator
-  (`llama3.1:8b`) and judge both run via ollama. Everything else keeps its
-  existing behavior — W&B stays online if `WANDB_API_KEY` is set, the JEV
-  gate stays live if `TYPESAFE_API_KEY` is set.
+  `LLM_PROVIDER=ollama` + `JUDGE_MODEL_INDEX=<n>` (see *Judge selection*
+  below). The generator (`llama3.1:8b-instruct-q4_K_M`) and the judge(s) run
+  via ollama, all 4-bit. Everything else keeps its existing behaviour: W&B
+  stays online if `WANDB_API_KEY` is set, and the JEV gate stays live if
+  `TYPESAFE_API_KEY` is set.
 - **Profile B (cloud-judge upgrade, opt-in):** `JUDGE_PROVIDER=huggingface`
   puts the judge on paper-parity `Qwen/Qwen2.5-72B-Instruct` via HF Inference
   Providers while the generator stays local.
@@ -115,9 +213,12 @@ python src/main.py figures
 Arms (one label each, used verbatim in JSON, tables and figures):
 **Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)**, BM25 RAG (top-5),
 Dense RAG (S-PubMedBERT, top-5), Hybrid BM25+Dense RAG (RRF, top-5), HCAD-RAG.
-Judges: `JUDGE_ENSEMBLE` (default `ollama:gemma2:9b,ollama:qwen2.5:14b`;
-`JUDGE_ENABLE_API_JUDGE=1` adds `meta/llama-3.3-70b-instruct` via NVIDIA NIM),
-every call in JSON mode, no neutral fallback scores on judge failure.
+Judges: selected by `JUDGE_MODEL_INDEX` (below), or an explicit
+`JUDGE_ENSEMBLE` list. The default panel is
+`ollama:gemma2:9b-instruct-q4_K_M,ollama:qwen2.5:14b-instruct-q4_K_M`, and
+`JUDGE_ENABLE_API_JUDGE=1` adds `meta/llama-3.3-70b-instruct` via NVIDIA NIM.
+Every call runs in JSON mode, and a judge failure never becomes a neutral
+fallback score.
 Outputs:
 - **5-Dimension Scoring Assessment** (0–100 scale: Comprehensiveness, Diversity, Empowerment, Logical, Readability)
 - **8-Criteria Selection Assessment** (Pairwise Win-Rate with order counterbalancing)
@@ -127,16 +228,69 @@ Outputs:
 - **Retrieval Quality** (`src/evaluation/metrics.py`): NDCG@5 / Recall@5 over the paper-protocol gold relevance labels — the source chunk that generated each question
 - **Citation Precision**: fraction of `[Evidence i]` tags in generated answers that resolve to actually retrieved items
 - **MedHallu hallucination evaluation** via `src/evaluation/hallucination_evaluator.py`
+- **Evidence diagnostics** (`evidence_diagnostics`): what each arm handed the generator (see *Mechanism*)
+
 Per-question results are checkpointed to `results/base_paper_checkpoint.jsonl`
 and all aggregates are recomputed from the checkpoint, so interrupted runs
-resume without losing or double-counting samples. W&B logs the aggregate and
-per-question numeric metrics when `WANDB_API_KEY` is configured.
+resume without losing or double-counting samples. Every record is tagged
+with its judge panel and an HCAD evidence-config fingerprint
+(`hcad_config_id`). A question counts as done, and is aggregated, only for
+the same judges and the same HCAD settings, so switching the judge index or
+an evidence toggle re-evaluates rather than mixing scores. W&B logs the
+aggregate and per-question numeric metrics when `WANDB_API_KEY` is
+configured.
+
+### Judge selection and quantization
+`src/judge_models.py` is the single registry of judge models. Set an index
+and every judge call in `src/` follows, with no source edits:
+
+| `JUDGE_MODEL_INDEX` | Judge | `q4_K_M` tag | Size |
+|---|---|---|---|
+| 0 | Qwen3-14B | `qwen3:14b-q4_K_M` | 9.3 GB |
+| 1 | DeepSeek-R1-Distill-Qwen-14B | `deepseek-r1:14b-qwen-distill-q4_K_M` | 9.0 GB |
+| 2 | Gemma 3 12B IT | `gemma3:12b-it-q4_K_M` | 8.2 GB |
+| 3 | Qwen2.5-14B-Instruct | `qwen2.5:14b-instruct-q4_K_M` | 9.0 GB |
+| 4 | Phi-4 14B | `phi4:14b-q4_K_M` | 9.1 GB |
+| 5 | Gemma 2 9B IT | `gemma2:9b-instruct-q4_K_M` | 5.8 GB |
+
+- `JUDGE_MODEL_INDEX=2` selects one judge; `JUDGE_MODEL_INDEX=0,3` selects a two-judge
+  consensus panel, with Cohen's/Fleiss' kappa reported.
+- Precedence: `JUDGE_ENSEMBLE` > `JUDGE_MODEL_INDEX` > default panel.
+- `JUDGE_QUANT` (default `q4_K_M`) picks the quantization; some models also
+  offer `q3_K_M`, `qat`, `q8_0` and `fp16`. An unknown index or quant fails
+  immediately with the menu.
+- **All LLMs are 4-bit**: the generator and the default panel use explicit
+  `q4_K_M` tags rather than Ollama's implicit default tag.
+- Memory: judge calls send `num_ctx=8192`. Reasoning models (qwen3,
+  deepseek-r1) get `think=False`, so chain-of-thought does not consume the
+  token budget or break the JSON.
+- On Kaggle the notebook exposes **only** `JUDGE_MODEL_INDEX`. The quant,
+  30 questions, KV-cache `q8_0` and evidence settings are fixed so team
+  members' runs stay comparable.
+
+### Error handling
+- **Judge preflight** (before any generation): every judge must be pulled
+  in ollama and answer a JSON test call. Otherwise the run stops with
+  `ollama pull <tag>` or an out-of-memory hint. `JUDGE_SKIP_PREFLIGHT=1`
+  skips this check.
+- **Broken-judge abort**: per-judge failure counters (stored in the
+  manifest as `session_failures`). After 2 questions, a judge failing more than
+  `JUDGE_MAX_FAILURE_RATE` (0.5) of its evaluations aborts the run, because its
+  verdicts would be missing rather than judgments. Checkpointed questions are kept.
+- **Kaggle notebook**:
+  - `run_checked` turns a SIGKILL into an explicit out-of-memory error,
+    printing `free -h`, `nvidia-smi`, `ollama ps` and the ollama log;
+  - pulls are retried;
+  - every model is warmed up and must be `100% GPU`, since CPU offload is what
+    exhausts host RAM next to the PrimeKG graph;
+  - models are swapped one at a time when they do not all fit in VRAM;
+  - the cell checks that `src/` resolves exactly the tags the notebook pulled.
 Weight learning tunes only `filter_k`, the learned parameter currently consumed by
 the retriever. Anisotropic and component-scoring weights remain at their configured
 values; retrieval and model architecture are unchanged.
 ### Hybrid judging (small-GPU machines)
 `JUDGE_PROVIDER` decouples the judge from the generator. With
-`LLM_PROVIDER=ollama` (local `llama3.1:8b` via ollama) plus
+`LLM_PROVIDER=ollama` (local `llama3.1:8b-instruct-q4_K_M` via ollama) plus
 `JUDGE_PROVIDER=huggingface`, the judge runs on the paper-parity
 `Qwen/Qwen2.5-72B-Instruct` through Hugging Face Inference Providers
 (pay-per-token, needs HF billing; roughly $2 for a 50-sample run) while all
@@ -151,6 +305,9 @@ NVIDIA NIM. Without the variable, the judge follows `LLM_PROVIDER`.
 | `HCAD_RELATION_VOCAB` | `1` | PrimeKG relation labels / query relations mapped to canonical verb phrases |
 | `HCAD_EXPANSION_RULE` | `soft` | Member order inside relation hyperedges: `desc`, `soft`, `asc_cap` |
 | `HCAD_TAU_SAT` | unset | Gate-2 saturation ceiling, calibrated by `retrieval-eval` on the dev pool |
+| `HCAD_DENSE_ANCHOR_K` | `1` | Best full-text passages always admitted; `0` = legacy structure-only selection |
+| `HCAD_DENSE_ANCHOR_MIN` | `0.40` | Cosine floor a dense anchor must clear |
+| `HCAD_GROUP_FACTS` | `1` | One evidence line per (head, relation) hyperedge; `0` = one line per triple |
 `python src/main.py retrieval-eval --pool dev` reports paired Recall@5/NDCG@5
 for the legacy baseline, each added change, and the full configuration.
 
@@ -207,6 +364,7 @@ HCAD/
 ├── .gitignore                         # Git exclusion rules
 ├── src/
 │   ├── config.py                      # Global configurations, model weights & paths
+│   ├── judge_models.py                # Judge registry: index + quant -> exact 4-bit ollama tag
 │   ├── main.py                        # CLI entry point
 │   ├── wandb_tracking.py              # Shared W&B helpers (auto-enabled when configured)
 │   ├── api/
@@ -224,7 +382,7 @@ HCAD/
 │   │   ├── hypergraph_builder.py      # Innovation 3: Bidirectional hyperedge expansion
 │   │   ├── fact_hypergraph.py         # N-ary clinical fact hypergraph from PrimeKG shared-tail contexts
 │   │   ├── statistical_filter.py      # Innovation 4: Adaptive Heaviside cutoff
-│   │   ├── decision_gate.py           # Innovation 5: JEV System One groundedness gate
+│   │   ├── decision_gate.py           # JEV gate + evidence assembly (anchors, hyperedge lines, budget)
 │   │   ├── dynamic_tensor.py          # (P3, opt-in) trainable anisotropic tensor
 │   │   ├── entropy_gate.py            # (P3, opt-in) entropy-based abstention gate
 │   │   ├── weight_learner.py          # filter_k weight learning

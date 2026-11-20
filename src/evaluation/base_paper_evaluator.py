@@ -663,12 +663,40 @@ class MultiJudgeEvaluator:
             e.name = name
             self.evaluators.append(e)
         names = [e.name for e in self.evaluators]
-        if len(set(names)) != len(names):
-            raise ValueError(f"Duplicate judge names in ensemble: {names}")
+        self.calls: Dict[str, int] = {n: 0 for n in names}
+        self.failures: Dict[str, int] = {n: 0 for n in names}
 
     @property
     def judge_names(self) -> List[str]:
         return [e.name for e in self.evaluators]
+
+    def failure_rate(self, name: str) -> float:
+        calls = self.calls.get(name, 0)
+        return self.failures.get(name, 0) / calls if calls else 0.0
+
+    def check_ready(self) -> None:
+        """Preflight every judge (pulled, loadable, answers JSON).
+
+        Raises RuntimeError naming the failing judge(s), so a missing or
+        out-of-memory judge stops the run before any generation work.
+        """
+        problems = []
+        for ev in self.evaluators:
+            check = getattr(ev.judge, "check_ready", None)
+            if check is None:
+                continue
+            try:
+                check()
+                logger.info("Judge %s preflight OK", ev.name)
+            except Exception as exc:
+                problems.append(f"{ev.name}: {exc}")
+        if problems:
+            raise RuntimeError("Judge preflight failed:\n  " + "\n  ".join(problems))
+
+    def _record(self, name: str, ok: bool) -> None:
+        self.calls[name] = self.calls.get(name, 0) + 1
+        if not ok:
+            self.failures[name] = self.failures.get(name, 0) + 1
 
     @classmethod
     def from_config(cls) -> "MultiJudgeEvaluator":
@@ -683,7 +711,8 @@ class MultiJudgeEvaluator:
         for provider, model in judge_ensemble_specs():
             client = UnifiedLLMClient(model=model, provider=provider,
                                       temperature=JUDGE_TEMPERATURE,
-                                      max_tokens=JUDGE_MAX_TOKENS, strict=True)
+                                      max_tokens=JUDGE_MAX_TOKENS, strict=True,
+                                      is_judge=True)
             evaluators.append(BasePaperEvaluator(judge_llm=client,
                                                  name=f"{provider}:{model}"))
         return cls(evaluators)
@@ -691,7 +720,10 @@ class MultiJudgeEvaluator:
     def manifest(self) -> List[Dict[str, str]]:
         return [{"name": e.name,
                  "provider": getattr(e.judge, "provider", ""),
-                 "model": getattr(e.judge, "model", "")} for e in self.evaluators]
+                 "model": getattr(e.judge, "model", ""),
+                 "session_evaluations": self.calls.get(e.name, 0),
+                 "session_failures": self.failures.get(e.name, 0)}
+                for e in self.evaluators]
 
     # -- scoring ---------------------------------------------------------------
     def evaluate_scoring(self, question: str, answer: str, reference_document: str,
@@ -706,9 +738,11 @@ class MultiJudgeEvaluator:
                     answer_evidence=answer_evidence, retries=retries,
                     fallback_on_error=fallback_on_error)
                 per_judge[name] = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
+                self._record(name, True)
             except Exception as exc:
                 logger.warning("Judge %s scoring failed: %s", name, exc)
                 per_judge[name] = None
+                self._record(name, False)
         valid = [r for r in per_judge.values() if r]
         consensus = (
             {d: sum(r[d] for r in valid) / len(valid) for d in SCORE_DIMENSIONS}
@@ -740,9 +774,11 @@ class MultiJudgeEvaluator:
                     per_judge[name] = merge_counterbalanced(ab, ba)
                 else:
                     per_judge[name] = ab
+                self._record(name, True)
             except Exception as exc:
                 logger.warning("Judge %s selection failed: %s", name, exc)
                 per_judge[name] = None
+                self._record(name, False)
         valid = [v for v in per_judge.values() if v]
         if valid:
             consensus = {

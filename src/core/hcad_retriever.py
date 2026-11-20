@@ -25,6 +25,8 @@ from src.config import (
     SCORE_WEIGHT_RELATION,
     aniso_dim_weighting_enabled,
     decision_gate_enabled,
+    dense_anchor_k,
+    dense_anchor_min,
     dense_weight,
     map_query_relation,
     map_relation_text,
@@ -544,6 +546,32 @@ class HCADRetriever:
         candidates = vector_cands + fact_cands + graph_cands
         return candidates[:CANDIDATE_POOL_MAX]
 
+    @staticmethod
+    def _dense_anchors(candidates: list[dict], dense, phi_scores) -> list[dict]:
+        """Top-K candidates by full-text cosine that clear the anchor floor.
+
+        Only dense-channel (vector) hits qualify; anchors keep their hybrid
+        score as phi_final and are flagged so the decision gate does not
+        re-reject them for the structural missing-channel prior.
+        """
+        k_anchor = dense_anchor_k()
+        if k_anchor <= 0 or dense is None or len(candidates) == 0:
+            return []
+        dense = np.asarray(dense, dtype=np.float32)
+        if not dense.any():  # dense channel disabled (HCAD_DENSE_WEIGHT=0)
+            return []
+        floor = dense_anchor_min()
+        order = np.argsort(-dense, kind="stable")
+        anchors: list[dict] = []
+        for i in order:
+            if len(anchors) >= k_anchor or dense[i] < floor:
+                break
+            cand = candidates[int(i)]
+            if cand.get("source") != "vector" or not cand.get("document"):
+                continue
+            anchors.append({**cand, "phi_final": float(phi_scores[int(i)]), "anchor": True})
+        return anchors
+
     def _dense_similarities(self, query: str, candidates: list[dict]) -> np.ndarray:
         """Full-text cosine(query, candidate document) for every candidate.
 
@@ -779,18 +807,30 @@ class HCADRetriever:
             k=k,
             max_top_k=MAX_EVIDENCE_ITEMS,
         )
+        # Dense anchor (see config.DENSE_ANCHOR_K): the best full-text matches
+        # are always part of the evidence; the structure-ranked survivors
+        # complement them. Anchors keep their hybrid-score position; the
+        # decision gate guarantees them a slot and budget.
+        anchors = self._dense_anchors(candidates, dense, phi_scores)
+        if anchors:
+            anchor_docs = {a["document"] for a in anchors}
+            filtered = sorted(
+                anchors + [c for c in filtered if c.get("document") not in anchor_docs],
+                key=lambda c: c.get("phi_final", 0.0), reverse=True)
         timings["scoring_and_filter"] = time.perf_counter() - _t
 
         # the previous "Fix #2" re-admitted candidates
         # BELOW the absolute floor Phi_min = 0.10 whenever both gates rejected
         # everything - defeating Gate 1 exactly on out-of-domain queries.
         # Correct behavior: abstain (empty context) so the generator relies on
-        # parametric knowledge rather than being distracted by noise.
+        # parametric knowledge rather than being distracted by noise. With a
+        # dense anchor, abstention happens only when no candidate is a
+        # confident full-text match either.
         if not filtered:
             logger.warning(
-                "All %d candidates rejected by dual-gating (floor %.2f). "
-                "Abstaining from retrieval - parametric mode.",
-                len(candidates), MIN_PHI_SCORE,
+                "All %d candidates rejected by dual-gating (floor %.2f) and no "
+                "dense anchor >= %.2f. Abstaining from retrieval - parametric mode.",
+                len(candidates), MIN_PHI_SCORE, dense_anchor_min(),
             )
             return []
 

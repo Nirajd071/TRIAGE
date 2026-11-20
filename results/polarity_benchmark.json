@@ -1,0 +1,931 @@
+{
+  "benchmark": "paired_polarity_indication_vs_contraindication",
+  "mode": "corpus",
+  "k": 5,
+  "n_pairs": 35,
+  "n_queries": 140,
+  "n_corpus_statements": 70,
+  "polarity_type_counts": {
+    "contraindication": 30,
+    "caution": 5
+  },
+  "arms": {
+    "bm25": {
+      "overall": {
+        "n_queries": 140,
+        "polarity_recall_at_k": {
+          "n": 140,
+          "mean": 1.0,
+          "ci_low": 1.0,
+          "ci_high": 1.0,
+          "std": 0.0,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "polarity_error_rate": {
+          "n": 140,
+          "mean": 0.25,
+          "ci_low": 0.17857142857142858,
+          "ci_high": 0.32142857142857145,
+          "std": 0.4345675101331315,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "opposite_in_top_k_rate": {
+          "n": 140,
+          "mean": 0.9928571428571429,
+          "ci_low": 0.9785714285714285,
+          "ci_high": 1.0,
+          "std": 0.08451542547285167,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "mrr": {
+          "n": 140,
+          "mean": 0.8047619047619047,
+          "ci_low": 0.7571428571428571,
+          "ci_high": 0.8488095238095238,
+          "std": 0.27552932644159567,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        }
+      },
+      "pair_accuracy": {
+        "n": 70,
+        "mean": 0.5142857142857142,
+        "ci_low": 0.38571428571428573,
+        "ci_high": 0.6285714285714286,
+        "std": 0.5034045580527884,
+        "confidence": 0.95,
+        "n_resamples": 10000
+      },
+      "by_target_polarity": {
+        "indication": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.11428571428571428,
+            "ci_low": 0.04285714285714286,
+            "ci_high": 0.18571428571428572,
+            "std": 0.3204551628343091,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.9333333333333332,
+            "ci_low": 0.8904761904761904,
+            "ci_high": 0.9714285714285714,
+            "std": 0.17583479290554316,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        },
+        "opposite": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.38571428571428573,
+            "ci_low": 0.2714285714285714,
+            "ci_high": 0.5,
+            "std": 0.490278156567732,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 0.9857142857142858,
+            "ci_low": 0.9571428571428572,
+            "ci_high": 1.0,
+            "std": 0.11952286093343938,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.6761904761904762,
+            "ci_low": 0.604761904761905,
+            "ci_high": 0.7452380952380953,
+            "std": 0.29744715533005295,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        }
+      },
+      "by_phrasing": {
+        "lexical": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.1,
+            "ci_low": 0.02857142857142857,
+            "ci_high": 0.17142857142857143,
+            "std": 0.30216609311120096,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 0.9857142857142858,
+            "ci_low": 0.9571428571428572,
+            "ci_high": 1.0,
+            "std": 0.11952286093343938,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.919047619047619,
+            "ci_low": 0.8714285714285714,
+            "ci_high": 0.9619047619047618,
+            "std": 0.18980211990517096,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        },
+        "paraphrase": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.4,
+            "ci_low": 0.2857142857142857,
+            "ci_high": 0.5142857142857142,
+            "std": 0.49343516379516894,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.6904761904761905,
+            "ci_low": 0.6190476190476191,
+            "ci_high": 0.7595238095238096,
+            "std": 0.30067786310884126,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        }
+      },
+      "mean_seconds_per_query": 5.940627857593686e-05
+    },
+    "dense": {
+      "overall": {
+        "n_queries": 140,
+        "polarity_recall_at_k": {
+          "n": 140,
+          "mean": 1.0,
+          "ci_low": 1.0,
+          "ci_high": 1.0,
+          "std": 0.0,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "polarity_error_rate": {
+          "n": 140,
+          "mean": 0.22857142857142856,
+          "ci_low": 0.15714285714285714,
+          "ci_high": 0.3,
+          "std": 0.4214202970950734,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "opposite_in_top_k_rate": {
+          "n": 140,
+          "mean": 0.9857142857142858,
+          "ci_low": 0.9642857142857143,
+          "ci_high": 1.0,
+          "std": 0.1190921465202281,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "mrr": {
+          "n": 140,
+          "mean": 0.8767857142857143,
+          "ci_low": 0.8392857142857143,
+          "ci_high": 0.9125,
+          "std": 0.21933604144104016,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        }
+      },
+      "pair_accuracy": {
+        "n": 70,
+        "mean": 0.5428571428571428,
+        "ci_low": 0.42857142857142855,
+        "ci_high": 0.6571428571428571,
+        "std": 0.5017567482042767,
+        "confidence": 0.95,
+        "n_resamples": 10000
+      },
+      "by_target_polarity": {
+        "indication": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.02857142857142857,
+            "ci_low": 0.0,
+            "ci_high": 0.07142857142857142,
+            "std": 0.1678015193509294,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 0.9714285714285714,
+            "ci_low": 0.9285714285714286,
+            "ci_high": 1.0,
+            "std": 0.1678015193509294,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.9857142857142858,
+            "ci_low": 0.9642857142857143,
+            "ci_high": 1.0,
+            "std": 0.0839007596754647,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        },
+        "opposite": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.42857142857142855,
+            "ci_low": 0.3142857142857143,
+            "ci_high": 0.5428571428571428,
+            "std": 0.4984447862792269,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.7678571428571429,
+            "ci_low": 0.7071428571428572,
+            "ci_high": 0.8285714285714286,
+            "std": 0.2565145014243713,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        }
+      },
+      "by_phrasing": {
+        "lexical": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.1,
+            "ci_low": 0.04285714285714286,
+            "ci_high": 0.17142857142857143,
+            "std": 0.30216609311120096,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 0.9714285714285714,
+            "ci_low": 0.9285714285714286,
+            "ci_high": 1.0,
+            "std": 0.1678015193509294,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.9357142857142857,
+            "ci_low": 0.8928571428571429,
+            "ci_high": 0.9714285714285714,
+            "std": 0.1685709021994098,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        },
+        "paraphrase": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.35714285714285715,
+            "ci_low": 0.24285714285714285,
+            "ci_high": 0.4714285714285714,
+            "std": 0.48261708906584005,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.8178571428571428,
+            "ci_low": 0.7571428571428571,
+            "ci_high": 0.875,
+            "std": 0.24789486350878118,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        }
+      },
+      "mean_seconds_per_query": 0.006386713642853335
+    },
+    "hybrid": {
+      "overall": {
+        "n_queries": 140,
+        "polarity_recall_at_k": {
+          "n": 140,
+          "mean": 1.0,
+          "ci_low": 1.0,
+          "ci_high": 1.0,
+          "std": 0.0,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "polarity_error_rate": {
+          "n": 140,
+          "mean": 0.25,
+          "ci_low": 0.17857142857142858,
+          "ci_high": 0.32142857142857145,
+          "std": 0.4345675101331315,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "opposite_in_top_k_rate": {
+          "n": 140,
+          "mean": 1.0,
+          "ci_low": 1.0,
+          "ci_high": 1.0,
+          "std": 0.0,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        },
+        "mrr": {
+          "n": 140,
+          "mean": 0.8619047619047618,
+          "ci_low": 0.8214285714285714,
+          "ci_high": 0.9,
+          "std": 0.2381842930404562,
+          "confidence": 0.95,
+          "n_resamples": 10000
+        }
+      },
+      "pair_accuracy": {
+        "n": 70,
+        "mean": 0.5142857142857142,
+        "ci_low": 0.4,
+        "ci_high": 0.6285714285714286,
+        "std": 0.5034045580527884,
+        "confidence": 0.95,
+        "n_resamples": 10000
+      },
+      "by_target_polarity": {
+        "indication": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.02857142857142857,
+            "ci_low": 0.0,
+            "ci_high": 0.07142857142857142,
+            "std": 0.1678015193509294,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.9857142857142858,
+            "ci_low": 0.9642857142857143,
+            "ci_high": 1.0,
+            "std": 0.0839007596754647,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        },
+        "opposite": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.4714285714285714,
+            "ci_low": 0.35714285714285715,
+            "ci_high": 0.5857142857142857,
+            "std": 0.5027872622251885,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.738095238095238,
+            "ci_low": 0.6738095238095237,
+            "ci_high": 0.8023809523809524,
+            "std": 0.2759428699003026,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        }
+      },
+      "by_phrasing": {
+        "lexical": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.11428571428571428,
+            "ci_low": 0.04285714285714286,
+            "ci_high": 0.2,
+            "std": 0.3204551628343091,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.9380952380952382,
+            "ci_low": 0.8952380952380952,
+            "ci_high": 0.9761904761904762,
+            "std": 0.17531069399637775,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        },
+        "paraphrase": {
+          "n_queries": 70,
+          "polarity_recall_at_k": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "polarity_error_rate": {
+            "n": 70,
+            "mean": 0.38571428571428573,
+            "ci_low": 0.2714285714285714,
+            "ci_high": 0.5,
+            "std": 0.49027815656773194,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "opposite_in_top_k_rate": {
+            "n": 70,
+            "mean": 1.0,
+            "ci_low": 1.0,
+            "ci_high": 1.0,
+            "std": 0.0,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          },
+          "mrr": {
+            "n": 70,
+            "mean": 0.7857142857142857,
+            "ci_low": 0.7214285714285715,
+            "ci_high": 0.8476190476190476,
+            "std": 0.26790602268524744,
+            "confidence": 0.95,
+            "n_resamples": 10000
+          }
+        }
+      },
+      "mean_seconds_per_query": 0.006502344349999995
+    }
+  },
+  "significance_mcnemar_polarity_error": {},
+  "pairs": [
+    {
+      "drug": "Metformin",
+      "indication": "type 2 diabetes mellitus",
+      "indication_evidence": "Metformin is indicated as first-line pharmacotherapy for type 2 diabetes mellitus to improve glycemic control.",
+      "opposite": "severe renal impairment",
+      "opposite_evidence": "Metformin is contraindicated in severe renal impairment (eGFR below 30 mL/min/1.73 m2) because of the risk of lactic acidosis.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Warfarin",
+      "indication": "atrial fibrillation",
+      "indication_evidence": "Warfarin is indicated for prevention of stroke and systemic embolism in patients with atrial fibrillation.",
+      "opposite": "pregnancy",
+      "opposite_evidence": "Warfarin is contraindicated in pregnancy because it crosses the placenta and causes embryopathy and fetal hemorrhage.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Propranolol",
+      "indication": "hypertension",
+      "indication_evidence": "Propranolol is indicated for the management of hypertension, alone or combined with other antihypertensive agents.",
+      "opposite": "bronchial asthma",
+      "opposite_evidence": "Propranolol is contraindicated in bronchial asthma because non-selective beta blockade can precipitate severe bronchospasm.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Isotretinoin",
+      "indication": "severe recalcitrant nodular acne",
+      "indication_evidence": "Isotretinoin is indicated for severe recalcitrant nodular acne unresponsive to conventional therapy including systemic antibiotics.",
+      "opposite": "pregnancy",
+      "opposite_evidence": "Isotretinoin is contraindicated in pregnancy because it is a potent teratogen causing severe birth defects.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Sildenafil",
+      "indication": "erectile dysfunction",
+      "indication_evidence": "Sildenafil is indicated for the treatment of erectile dysfunction.",
+      "opposite": "concomitant nitrate therapy",
+      "opposite_evidence": "Sildenafil is contraindicated in patients taking organic nitrates because the combination causes profound hypotension.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Aspirin",
+      "indication": "secondary prevention of myocardial infarction",
+      "indication_evidence": "Low-dose aspirin is indicated for secondary prevention of myocardial infarction and ischemic stroke.",
+      "opposite": "children with viral illness",
+      "opposite_evidence": "Aspirin should be avoided in children and teenagers with viral illness such as influenza or varicella because of the risk of Reye syndrome.",
+      "polarity_type": "caution"
+    },
+    {
+      "drug": "Lisinopril",
+      "indication": "hypertension",
+      "indication_evidence": "Lisinopril is indicated for the treatment of hypertension and of symptomatic heart failure.",
+      "opposite": "history of angioedema",
+      "opposite_evidence": "Lisinopril is contraindicated in patients with a history of angioedema related to previous ACE inhibitor treatment.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Methotrexate",
+      "indication": "rheumatoid arthritis",
+      "indication_evidence": "Methotrexate is indicated as disease-modifying therapy for active rheumatoid arthritis.",
+      "opposite": "pregnancy",
+      "opposite_evidence": "Methotrexate is contraindicated in pregnant women with non-neoplastic disease because it causes fetal death and congenital anomalies.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Lithium",
+      "indication": "bipolar disorder",
+      "indication_evidence": "Lithium is indicated for the treatment and maintenance of bipolar disorder to reduce manic episodes.",
+      "opposite": "renal impairment and dehydration",
+      "opposite_evidence": "Lithium requires great caution in renal impairment, dehydration or sodium depletion because lithium toxicity develops rapidly.",
+      "polarity_type": "caution"
+    },
+    {
+      "drug": "Ibuprofen",
+      "indication": "osteoarthritis pain",
+      "indication_evidence": "Ibuprofen is indicated for relief of the signs and symptoms of osteoarthritis and mild to moderate pain.",
+      "opposite": "active peptic ulcer disease",
+      "opposite_evidence": "Ibuprofen is contraindicated in active peptic ulcer disease or gastrointestinal bleeding because NSAIDs worsen mucosal injury.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Verapamil",
+      "indication": "supraventricular tachycardia",
+      "indication_evidence": "Verapamil is indicated for rate control and termination of paroxysmal supraventricular tachycardia.",
+      "opposite": "Wolff-Parkinson-White syndrome with atrial fibrillation",
+      "opposite_evidence": "Verapamil is contraindicated in atrial fibrillation with an accessory pathway such as Wolff-Parkinson-White syndrome because it can accelerate ventricular response.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Clozapine",
+      "indication": "treatment-resistant schizophrenia",
+      "indication_evidence": "Clozapine is indicated for treatment-resistant schizophrenia after failure of other antipsychotics.",
+      "opposite": "history of clozapine-induced agranulocytosis",
+      "opposite_evidence": "Clozapine must not be restarted in patients with a history of clozapine-induced agranulocytosis or severe neutropenia.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Tamoxifen",
+      "indication": "estrogen receptor-positive breast cancer",
+      "indication_evidence": "Tamoxifen is indicated for the treatment of estrogen receptor-positive breast cancer.",
+      "opposite": "history of deep vein thrombosis or pulmonary embolism",
+      "opposite_evidence": "Tamoxifen is contraindicated for breast cancer risk reduction in women with a history of deep vein thrombosis or pulmonary embolism.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Ciprofloxacin",
+      "indication": "complicated urinary tract infection",
+      "indication_evidence": "Ciprofloxacin is indicated for complicated urinary tract infections and pyelonephritis caused by susceptible bacteria.",
+      "opposite": "myasthenia gravis",
+      "opposite_evidence": "Ciprofloxacin should be avoided in patients with myasthenia gravis because fluoroquinolones can exacerbate muscle weakness.",
+      "polarity_type": "caution"
+    },
+    {
+      "drug": "Succinylcholine",
+      "indication": "rapid sequence intubation",
+      "indication_evidence": "Succinylcholine is indicated as a short-acting neuromuscular blocker to facilitate rapid sequence intubation.",
+      "opposite": "personal or family history of malignant hyperthermia",
+      "opposite_evidence": "Succinylcholine is contraindicated in patients with a personal or family history of malignant hyperthermia.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Levothyroxine",
+      "indication": "hypothyroidism",
+      "indication_evidence": "Levothyroxine is indicated as replacement therapy for primary hypothyroidism.",
+      "opposite": "uncorrected adrenal insufficiency",
+      "opposite_evidence": "Levothyroxine is contraindicated in uncorrected adrenal insufficiency because it can precipitate adrenal crisis.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Nitroglycerin",
+      "indication": "angina pectoris",
+      "indication_evidence": "Nitroglycerin is indicated for the acute relief and prophylaxis of angina pectoris.",
+      "opposite": "concomitant phosphodiesterase-5 inhibitor use",
+      "opposite_evidence": "Nitroglycerin is contraindicated with phosphodiesterase-5 inhibitors such as sildenafil because of severe hypotension.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Amiodarone",
+      "indication": "ventricular arrhythmias",
+      "indication_evidence": "Amiodarone is indicated for life-threatening recurrent ventricular arrhythmias such as ventricular tachycardia.",
+      "opposite": "second- or third-degree atrioventricular block without a pacemaker",
+      "opposite_evidence": "Amiodarone is contraindicated in second- or third-degree atrioventricular block unless a functioning pacemaker is present.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Spironolactone",
+      "indication": "heart failure with reduced ejection fraction",
+      "indication_evidence": "Spironolactone is indicated to reduce mortality in heart failure with reduced ejection fraction.",
+      "opposite": "hyperkalemia",
+      "opposite_evidence": "Spironolactone is contraindicated in hyperkalemia because it further raises serum potassium.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Pioglitazone",
+      "indication": "type 2 diabetes mellitus",
+      "indication_evidence": "Pioglitazone is indicated as an adjunct to diet and exercise to improve glycemic control in type 2 diabetes mellitus.",
+      "opposite": "NYHA class III or IV heart failure",
+      "opposite_evidence": "Pioglitazone is contraindicated in NYHA class III or IV heart failure because it causes fluid retention.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Valproate",
+      "indication": "epilepsy",
+      "indication_evidence": "Valproate is indicated for generalized and focal epilepsy including absence seizures.",
+      "opposite": "significant hepatic dysfunction",
+      "opposite_evidence": "Valproate is contraindicated in significant hepatic dysfunction because of the risk of fatal hepatotoxicity.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Carbamazepine",
+      "indication": "trigeminal neuralgia",
+      "indication_evidence": "Carbamazepine is indicated for the treatment of the pain of trigeminal neuralgia.",
+      "opposite": "history of bone marrow depression",
+      "opposite_evidence": "Carbamazepine is contraindicated in patients with a history of bone marrow depression.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Metoclopramide",
+      "indication": "diabetic gastroparesis",
+      "indication_evidence": "Metoclopramide is indicated for the relief of symptoms of diabetic gastroparesis.",
+      "opposite": "gastrointestinal obstruction",
+      "opposite_evidence": "Metoclopramide is contraindicated when stimulation of motility is dangerous, as in mechanical gastrointestinal obstruction or perforation.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Codeine",
+      "indication": "mild to moderate pain",
+      "indication_evidence": "Codeine is indicated for the management of mild to moderate pain in adults.",
+      "opposite": "children younger than 12 years",
+      "opposite_evidence": "Codeine is contraindicated in children younger than 12 years because ultra-rapid metabolism can cause fatal respiratory depression.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Tetracycline",
+      "indication": "acne vulgaris",
+      "indication_evidence": "Tetracycline is indicated as adjunctive therapy for severe acne vulgaris.",
+      "opposite": "children under 8 years",
+      "opposite_evidence": "Tetracycline should be avoided in children under 8 years because it causes permanent tooth discoloration.",
+      "polarity_type": "caution"
+    },
+    {
+      "drug": "Allopurinol",
+      "indication": "chronic gout",
+      "indication_evidence": "Allopurinol is indicated as urate-lowering therapy for chronic gout.",
+      "opposite": "HLA-B*58:01 carriers",
+      "opposite_evidence": "Allopurinol should be used with caution or avoided in HLA-B*58:01 carriers because of the high risk of severe cutaneous reactions.",
+      "polarity_type": "caution"
+    },
+    {
+      "drug": "Abacavir",
+      "indication": "HIV-1 infection",
+      "indication_evidence": "Abacavir is indicated in combination antiretroviral therapy for HIV-1 infection.",
+      "opposite": "HLA-B*57:01 positive patients",
+      "opposite_evidence": "Abacavir is contraindicated in HLA-B*57:01 positive patients because of the risk of hypersensitivity reactions.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Bupropion",
+      "indication": "major depressive disorder",
+      "indication_evidence": "Bupropion is indicated for the treatment of major depressive disorder and for smoking cessation.",
+      "opposite": "seizure disorder",
+      "opposite_evidence": "Bupropion is contraindicated in patients with a seizure disorder because it lowers the seizure threshold.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Sumatriptan",
+      "indication": "acute migraine",
+      "indication_evidence": "Sumatriptan is indicated for the acute treatment of migraine with or without aura.",
+      "opposite": "coronary artery disease",
+      "opposite_evidence": "Sumatriptan is contraindicated in ischemic coronary artery disease because it causes coronary vasoconstriction.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Ethinyl estradiol",
+      "indication": "contraception",
+      "indication_evidence": "Combined oral contraceptives containing ethinyl estradiol are indicated for the prevention of pregnancy.",
+      "opposite": "smokers over 35 years of age",
+      "opposite_evidence": "Combined oral contraceptives containing ethinyl estradiol are contraindicated in women over 35 years who smoke because of cardiovascular risk.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Heparin",
+      "indication": "venous thromboembolism",
+      "indication_evidence": "Heparin is indicated for the prophylaxis and treatment of venous thromboembolism.",
+      "opposite": "history of heparin-induced thrombocytopenia",
+      "opposite_evidence": "Heparin is contraindicated in patients with a history of heparin-induced thrombocytopenia.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Ceftriaxone",
+      "indication": "community-acquired pneumonia",
+      "indication_evidence": "Ceftriaxone is indicated for community-acquired pneumonia and other serious bacterial infections.",
+      "opposite": "neonates receiving intravenous calcium",
+      "opposite_evidence": "Ceftriaxone is contraindicated in neonates receiving calcium-containing intravenous solutions because of fatal precipitates.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Digoxin",
+      "indication": "atrial fibrillation rate control",
+      "indication_evidence": "Digoxin is indicated for ventricular rate control in chronic atrial fibrillation.",
+      "opposite": "ventricular fibrillation",
+      "opposite_evidence": "Digoxin is contraindicated in ventricular fibrillation.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Hydrochlorothiazide",
+      "indication": "hypertension",
+      "indication_evidence": "Hydrochlorothiazide is indicated for the management of hypertension and edema.",
+      "opposite": "anuria",
+      "opposite_evidence": "Hydrochlorothiazide is contraindicated in patients with anuria.",
+      "polarity_type": "contraindication"
+    },
+    {
+      "drug": "Atorvastatin",
+      "indication": "hypercholesterolemia",
+      "indication_evidence": "Atorvastatin is indicated to reduce LDL cholesterol in primary hypercholesterolemia.",
+      "opposite": "acute liver failure or decompensated cirrhosis",
+      "opposite_evidence": "Atorvastatin is contraindicated in acute liver failure or decompensated cirrhosis.",
+      "polarity_type": "contraindication"
+    }
+  ],
+  "timestamp": "2026-11-17T11:09:59+0530"
+}

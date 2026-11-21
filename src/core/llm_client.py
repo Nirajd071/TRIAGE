@@ -94,6 +94,45 @@ class UnifiedLLMClient:
             else:
                 return
 
+        if self.provider == "gemini":
+            from src.config import GEMINI_API_KEY
+            self.gemini_key = os.getenv("GEMINI_API_KEY") or GEMINI_API_KEY
+            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else "gemini-3.1-flash-lite"
+            if not self.gemini_key:
+                if strict:
+                    raise RuntimeError(f"GEMINI_API_KEY is not set but strict client requested gemini:{self.model}")
+                logger.warning("GEMINI_API_KEY not found; falling back to Ollama.")
+                self.provider = "ollama"
+                self.model = self.ollama_model
+            else:
+                return
+
+        if self.provider == "groq":
+            from src.config import GROQ_API_KEY
+            self.groq_key = os.getenv("GROQ_API_KEY") or GROQ_API_KEY
+            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else "qwen/qwen3.8-27b"
+            if not self.groq_key:
+                if strict:
+                    raise RuntimeError(f"GROQ_API_KEY is not set but strict client requested groq:{self.model}")
+                logger.warning("GROQ_API_KEY not found; falling back to Ollama.")
+                self.provider = "ollama"
+                self.model = self.ollama_model
+            else:
+                return
+
+        if self.provider == "openrouter":
+            from src.config import OPENROUTER_API_KEY
+            self.openrouter_key = os.getenv("OPENROUTER_API_KEY") or OPENROUTER_API_KEY
+            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else "nvidia/nemotron-3.5-lightning:free"
+            if not self.openrouter_key:
+                if strict:
+                    raise RuntimeError(f"OPENROUTER_API_KEY is not set but strict client requested openrouter:{self.model}")
+                logger.warning("OPENROUTER_API_KEY not found; falling back to Ollama.")
+                self.provider = "ollama"
+                self.model = self.ollama_model
+            else:
+                return
+
         if self.provider == "huggingface" and self.token:
             self.model = LLM_HF_MODEL if (not model or model == LLM_MODEL) else model
             try:
@@ -258,6 +297,133 @@ class UnifiedLLMClient:
                     raise RuntimeError(
                         f"NVIDIA NIM call failed for strict client {self.model}: {e}") from e
                 logger.warning("NVIDIA NIM call failed (%s); falling back to Ollama.", e)
+
+        if self.provider == "gemini":
+            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+            headers = {
+                "X-goog-api-key": self.gemini_key,
+                "Content-Type": "application/json",
+            }
+            contents = []
+            system_instruction = None
+            for m in messages:
+                role = m.get("role", "user")
+                text = m.get("content", "")
+                if role == "system":
+                    system_instruction = {"parts": [{"text": text}]}
+                else:
+                    g_role = "user" if role == "user" else "model"
+                    contents.append({"role": g_role, "parts": [{"text": text}]})
+            if not contents and system_instruction:
+                contents = [{"role": "user", "parts": system_instruction["parts"]}]
+                system_instruction = None
+
+            generation_config = {
+                "temperature": temp,
+                "maxOutputTokens": tokens,
+            }
+            if json_mode:
+                generation_config["responseMimeType"] = "application/json"
+
+            payload = {"contents": contents, "generationConfig": generation_config}
+            if system_instruction:
+                payload["systemInstruction"] = system_instruction
+
+            for attempt in range(3):
+                try:
+                    resp = requests.post(gemini_url, json=payload, headers=headers, timeout=60.0)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    usage = data.get("usageMetadata") or {}
+                    self.last_usage = {
+                        "prompt_tokens": usage.get("promptTokenCount"),
+                        "completion_tokens": usage.get("candidatesTokenCount"),
+                    }
+                    candidates = data.get("candidates") or []
+                    if candidates and "content" in candidates[0]:
+                        parts = candidates[0]["content"].get("parts") or []
+                        if parts:
+                            return parts[0].get("text") or ""
+                    return ""
+                except Exception as e:
+                    logger.warning("Gemini attempt %d failed: %s", attempt + 1, e)
+                    if attempt < 2:
+                        time.sleep(2.0 * (attempt + 1))
+                    elif self.strict:
+                        raise RuntimeError(f"Gemini call failed for strict client {self.model}: {e}") from e
+                    else:
+                        logger.warning("Gemini failed; falling back to Ollama (%s).", ollama_target)
+                        return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+
+        if self.provider == "groq":
+            groq_url = "https://api.groq.com/openai/v1/chat/completions"
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temp,
+                "max_tokens": tokens,
+            }
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
+            headers = {
+                "Authorization": f"Bearer {self.groq_key}",
+                "Content-Type": "application/json",
+            }
+            for attempt in range(3):
+                try:
+                    resp = requests.post(groq_url, json=payload, headers=headers, timeout=60.0)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    usage = data.get("usage") or {}
+                    self.last_usage = {
+                        "prompt_tokens": usage.get("prompt_tokens"),
+                        "completion_tokens": usage.get("completion_tokens"),
+                    }
+                    return data["choices"][0]["message"]["content"] or ""
+                except Exception as e:
+                    logger.warning("Groq attempt %d failed: %s", attempt + 1, e)
+                    if attempt < 2:
+                        time.sleep(1.5 * (attempt + 1))
+                    elif self.strict:
+                        raise RuntimeError(f"Groq call failed for strict client {self.model}: {e}") from e
+                    else:
+                        logger.warning("Groq failed; falling back to Ollama (%s).", ollama_target)
+                        return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+
+        if self.provider == "openrouter":
+            openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temp,
+                "max_tokens": tokens,
+            }
+            if json_mode:
+                payload["response_format"] = {"type": "json_object"}
+            headers = {
+                "Authorization": f"Bearer {self.openrouter_key}",
+                "Content-Type": "application/json",
+            }
+            for attempt in range(3):
+                try:
+                    resp = requests.post(openrouter_url, json=payload, headers=headers, timeout=60.0)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    usage = data.get("usage") or {}
+                    self.last_usage = {
+                        "prompt_tokens": usage.get("prompt_tokens"),
+                        "completion_tokens": usage.get("completion_tokens"),
+                    }
+                    return data["choices"][0]["message"]["content"] or ""
+                except Exception as e:
+                    logger.warning("OpenRouter attempt %d failed: %s", attempt + 1, e)
+                    if attempt < 2:
+                        time.sleep(2.0 * (attempt + 1))
+                    elif self.strict:
+                        raise RuntimeError(f"OpenRouter call failed for strict client {self.model}: {e}") from e
+                    else:
+                        logger.warning("OpenRouter failed; falling back to Ollama (%s).", ollama_target)
+                        return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
 
         if self.provider == "huggingface":
             for attempt in range(2):

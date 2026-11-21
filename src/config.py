@@ -412,7 +412,10 @@ NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com
 # Text-optimized NIM models (vision-instruct variants underperform on clinical
 # prose and waste tokens on the image tower). Override via env if needed.
 LLM_NVIDIA_MODEL = os.getenv("LLM_NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
-JUDGE_NVIDIA_MODEL = os.getenv("JUDGE_NVIDIA_MODEL", "qwen/qwen2.5-72b-instruct")
+JUDGE_NVIDIA_MODEL = os.getenv("JUDGE_NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hub downloads (SapBERT/S-PubMedBert) still need this
 WANDB_PROJECT = os.getenv("WANDB_PROJECT", "hcad-rag")
 WANDB_ENTITY = os.getenv("WANDB_ENTITY") or None
@@ -606,7 +609,7 @@ def judge_ensemble_specs() -> list[tuple[str, str]]:
                 f"Invalid JUDGE_ENSEMBLE entry {entry!r}: expected 'provider:model'"
             )
         provider = provider.strip().lower()
-        if provider not in ("ollama", "nvidia", "huggingface"):
+        if provider not in ("ollama", "nvidia", "huggingface", "gemini", "groq", "openrouter"):
             raise ValueError(f"Unknown judge provider {provider!r} in {entry!r}")
         spec = (provider, model.strip())
         if spec not in specs:

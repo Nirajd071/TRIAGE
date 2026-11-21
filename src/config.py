@@ -602,8 +602,10 @@ def judge_ensemble_specs() -> list[tuple[str, str]]:
     entries = [e.strip() for e in raw.split(",") if e.strip()]
     if os.environ.get("JUDGE_ENABLE_API_JUDGE", "0") == "1":
         entries.append(OPTIONAL_API_JUDGE)
+    if os.environ.get("JUDGE_ENABLE_GEMINI_JUDGE", "0") == "1":
         if os.environ.get("GEMINI_API_KEY") and not any(e.startswith("gemini:") for e in entries):
-            entries.append("gemini:gemini-3.1-flash-lite")
+            entries.append("gemini:gemini-2.5-flash")
+    if os.environ.get("JUDGE_ENABLE_GROQ_JUDGE", "0") == "1":
         if os.environ.get("GROQ_API_KEY") and not any(e.startswith("groq:") for e in entries):
             entries.append("groq:qwen/qwen3.8-27b")
     for entry in entries:

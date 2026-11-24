@@ -109,3 +109,41 @@ def test_multi_judge_evaluator_selection():
     assert sel_res["overall_winner"] == "HCAD-RAG"
     assert sel_res["agreement"]["type"] == "cohens_kappa"
     assert sel_res["agreement"]["kappa"] == 1.0
+
+
+def test_multi_judge_evaluator_selection_three_judges_fleiss_kappa():
+    mock_eval1 = MagicMock(spec=BasePaperEvaluator)
+    mock_eval1.judge = MagicMock()
+    mock_eval1.judge.model = "qwen3:14b"
+    mock_eval1.evaluate_selection.return_value = {
+        "criteria_winners": {crit: "HCAD-RAG" for crit in BasePaperEvaluator.CRITERIA_LIST},
+        "overall_winner": "HCAD-RAG",
+    }
+
+    mock_eval2 = MagicMock(spec=BasePaperEvaluator)
+    mock_eval2.judge = MagicMock()
+    mock_eval2.judge.model = "gemini-flash"
+    mock_eval2.evaluate_selection.return_value = {
+        "criteria_winners": {crit: "HCAD-RAG" for crit in BasePaperEvaluator.CRITERIA_LIST},
+        "overall_winner": "HCAD-RAG",
+    }
+
+    mock_eval3 = MagicMock(spec=BasePaperEvaluator)
+    mock_eval3.judge = MagicMock()
+    mock_eval3.judge.model = "groq-qwen"
+    mock_eval3.evaluate_selection.return_value = {
+        "criteria_winners": {crit: "HCAD-RAG" for crit in BasePaperEvaluator.CRITERIA_LIST},
+        "overall_winner": "HCAD-RAG",
+    }
+
+    multi = MultiJudgeEvaluator(judges=[mock_eval1, mock_eval2, mock_eval3])
+    sel_res = multi.evaluate_selection(
+        question="Query", answer_a="Ans A", answer_b="Ans B", reference_document="Ref",
+        label_a="HCAD-RAG", label_b="Vanilla RAG"
+    )
+
+    assert sel_res["overall_winner"] == "HCAD-RAG"
+    assert sel_res["n_valid_judges"] == 3
+    assert sel_res["agreement"]["type"] == "fleiss_kappa"
+    assert sel_res["agreement"]["kappa"] == 1.0
+

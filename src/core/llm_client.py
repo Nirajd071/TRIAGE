@@ -97,7 +97,7 @@ class UnifiedLLMClient:
         if self.provider == "gemini":
             from src.config import GEMINI_API_KEY
             self.gemini_key = os.getenv("GEMINI_API_KEY") or GEMINI_API_KEY
-            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else "gemini-3.1-flash-lite"
+            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else os.getenv("GEMINI_JUDGE_MODEL", "gemini-flash-lite-latest")
             if not self.gemini_key:
                 if strict:
                     raise RuntimeError(f"GEMINI_API_KEY is not set but strict client requested gemini:{self.model}")
@@ -299,7 +299,12 @@ class UnifiedLLMClient:
                 logger.warning("NVIDIA NIM call failed (%s); falling back to Ollama.", e)
 
         if self.provider == "gemini":
-            gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+            candidate_models = [self.model]
+            if "flash-lite" in self.model or "flash" in self.model:
+                for alt in ["gemini-flash-lite-latest", "gemini-3.5-flash-lite"]:
+                    if alt not in candidate_models:
+                        candidate_models.append(alt)
+
             headers = {
                 "X-goog-api-key": self.gemini_key,
                 "Content-Type": "application/json",
@@ -329,31 +334,37 @@ class UnifiedLLMClient:
             if system_instruction:
                 payload["systemInstruction"] = system_instruction
 
-            for attempt in range(3):
-                try:
-                    resp = requests.post(gemini_url, json=payload, headers=headers, timeout=60.0)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    usage = data.get("usageMetadata") or {}
-                    self.last_usage = {
-                        "prompt_tokens": usage.get("promptTokenCount"),
-                        "completion_tokens": usage.get("candidatesTokenCount"),
-                    }
-                    candidates = data.get("candidates") or []
-                    if candidates and "content" in candidates[0]:
-                        parts = candidates[0]["content"].get("parts") or []
-                        if parts:
-                            return parts[0].get("text") or ""
-                    return ""
-                except Exception as e:
-                    logger.warning("Gemini attempt %d failed: %s", attempt + 1, e)
-                    if attempt < 2:
-                        time.sleep(2.0 * (attempt + 1))
-                    elif self.strict:
-                        raise RuntimeError(f"Gemini call failed for strict client {self.model}: {e}") from e
-                    else:
-                        logger.warning("Gemini failed; falling back to Ollama (%s).", ollama_target)
-                        return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+            last_err = None
+            for cur_model in candidate_models:
+                gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{cur_model}:generateContent"
+                for attempt in range(5):
+                    try:
+                        resp = requests.post(gemini_url, json=payload, headers=headers, timeout=60.0)
+                        resp.raise_for_status()
+                        data = resp.json()
+                        usage = data.get("usageMetadata") or {}
+                        self.last_usage = {
+                            "prompt_tokens": usage.get("promptTokenCount"),
+                            "completion_tokens": usage.get("candidatesTokenCount"),
+                        }
+                        candidates = data.get("candidates") or []
+                        if candidates and "content" in candidates[0]:
+                            parts = candidates[0]["content"].get("parts") or []
+                            if parts:
+                                return parts[0].get("text") or ""
+                        return ""
+                    except Exception as e:
+                        last_err = e
+                        logger.warning("Gemini (%s) attempt %d failed: %s", cur_model, attempt + 1, e)
+                        if attempt < 4:
+                            time.sleep(min(16.0, 2.0 * (2 ** attempt)))
+                logger.warning("Gemini model %s exhausted retries; trying alternate candidate if available.", cur_model)
+
+            if self.strict:
+                raise RuntimeError(f"Gemini call failed for strict client {self.model}: {last_err}") from last_err
+            else:
+                logger.warning("Gemini failed; falling back to Ollama (%s).", ollama_target)
+                return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
 
         if self.provider == "groq":
             groq_url = "https://api.groq.com/openai/v1/chat/completions"

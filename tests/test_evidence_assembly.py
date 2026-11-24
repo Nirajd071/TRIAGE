@@ -104,6 +104,9 @@ def test_grouping_toggle_off_restores_one_line_per_triple(monkeypatch):
 def test_dense_anchor_selects_best_full_text_vector_hit(monkeypatch):
     from src.core.hcad_retriever import HCADRetriever
 
+    monkeypatch.delenv("HCAD_DENSE_ANCHOR_K", raising=False)
+    monkeypatch.delenv("HCAD_DENSE_ANCHOR_MIN", raising=False)
+
     cands = [
         {"document": "triple", "source": "graph_hyperedge"},
         {"document": "weak passage", "source": "vector"},

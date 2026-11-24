@@ -68,6 +68,8 @@ def test_ensemble_follows_judge_index(monkeypatch):
 
     monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
     monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
     monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
     default = [tuple(e.split(":", 1)) for e in DEFAULT_JUDGE_ENSEMBLE.split(",")]
     assert judge_ensemble_specs() == default

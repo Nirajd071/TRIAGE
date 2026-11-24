@@ -102,6 +102,8 @@ class TestConfig:
     def test_default_judge_ensemble(self, monkeypatch):
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
+        monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
+        monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
         monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
         assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q4_K_M"),
                                           ("ollama", "qwen2.5:14b-instruct-q4_K_M")]

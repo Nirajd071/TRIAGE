@@ -366,7 +366,7 @@ def run_mirage_benchmark(
 
     samples = _load_mirage_samples(n_per_dataset=n_per_dataset)
     built = build_arms(arms)
-    llm = UnifiedLLMClient(model=LLM_MODEL, temperature=0.0, max_tokens=64)
+    llm = UnifiedLLMClient(model=LLM_MODEL, temperature=0.0, max_tokens=96)
 
     ckpt = checkpoint_path or (RESULTS_DIR / "mirage_checkpoint.jsonl")
     ckpt.parent.mkdir(parents=True, exist_ok=True)
@@ -388,7 +388,7 @@ def run_mirage_benchmark(
                 with arm.active_env():
                     contexts = arm.retrieve(sample["retrieval_query"]) if arm.retrieve else []
                     msgs = arm.build_messages(sample["question"], contexts)
-                raw = llm.chat(msgs, temperature=0.0, max_tokens=64)
+                raw = llm.chat(msgs, temperature=0.0, max_tokens=96)
                 abstained = bool(_ABSTENTION_PAT.search(raw or ""))
                 pred = "X" if abstained else _extract_answer_letter(raw)
                 correct = int(pred == sample["gold_letter"])

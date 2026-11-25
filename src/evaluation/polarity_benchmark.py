@@ -467,8 +467,7 @@ def make_reranker_ranker(corpus: Sequence[Dict], cross_encoder=None) -> Ranker:
 
 
 def make_hcad_ranker(corpus: Sequence[Dict], retriever=None,
-                     with_kg_metadata: bool = False,
-                     env_overrides: Optional[Dict[str, str]] = None) -> Ranker:
+                     with_kg_metadata: bool = False) -> Ranker:
     """HCAD-RAG ranking of the curated corpus (stages 1, 3, 4).
 
     The corpus is injected as the candidate pool and the PRE-GATE hybrid
@@ -498,19 +497,16 @@ def make_hcad_ranker(corpus: Sequence[Dict], retriever=None,
         retriever._get_candidate_contexts = lambda *a, **kw: candidates()
         # The ranking uses PRE-gate scores, so the decision gate (a live
         # TypeSafe API call when TYPESAFE_API_KEY is set) is skipped here.
-        overrides = {"HCAD_DECISION_GATE": "0", **(env_overrides or {})}
-        saved = {k: os.environ.get(k) for k in overrides}
-        for k, v in overrides.items():
-            os.environ[k] = v
+        previous_gate = os.environ.get("HCAD_DECISION_GATE")
+        os.environ["HCAD_DECISION_GATE"] = "0"
         try:
             retriever.retrieve(q)
         finally:
             retriever._get_candidate_contexts = original
-            for k, prev in saved.items():
-                if prev is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = prev
+            if previous_gate is None:
+                os.environ.pop("HCAD_DECISION_GATE", None)
+            else:
+                os.environ["HCAD_DECISION_GATE"] = previous_gate
         pool = retriever._last_candidate_pool or []
         phi = retriever._last_phi_scores
         if not pool or phi is None:
@@ -683,14 +679,6 @@ def run_polarity_benchmark(arms: Sequence[str] = ("bm25", "dense", "hybrid", "re
         enc = _default_encoder()
     if {"dense", "hybrid"} & set(arms):
         dense = make_dense_ranker(corpus, enc)
-    hcad_shared = hcad_retriever
-    hcad_ablation_arms = {"hcad", "hcad_kg", "hcad_no_decoupling", "hcad_no_gs", "hcad_no_aniso"}
-    if hcad_shared is None and (hcad_ablation_arms & set(arms)):
-        import networkx as nx
-        from src.core.hcad_retriever import HCADRetriever
-        hcad_shared = HCADRetriever(graph=nx.Graph(), collection=None)
-
-    from src.config import ABLATION_ENV
     for arm in arms:
         if arm == "bm25":
             rankers[arm] = bm25
@@ -703,14 +691,9 @@ def run_polarity_benchmark(arms: Sequence[str] = ("bm25", "dense", "hybrid", "re
         elif arm == "rel_prefix":
             rankers[arm] = make_rel_prefix_ranker(corpus, enc)
         elif arm == "hcad":
-            rankers[arm] = make_hcad_ranker(corpus, hcad_shared, with_kg_metadata=False)
+            rankers[arm] = make_hcad_ranker(corpus, hcad_retriever, with_kg_metadata=False)
         elif arm == "hcad_kg":
-            rankers[arm] = make_hcad_ranker(corpus, hcad_shared, with_kg_metadata=True)
-        elif arm in ("hcad_no_decoupling", "hcad_no_gs", "hcad_no_aniso"):
-            rankers[arm] = make_hcad_ranker(
-                corpus, hcad_shared, with_kg_metadata=False,
-                env_overrides=dict(ABLATION_ENV.get(arm, {})),
-            )
+            rankers[arm] = make_hcad_ranker(corpus, hcad_retriever, with_kg_metadata=True)
         else:
             raise ValueError(f"Unknown polarity arm {arm!r}")
 

@@ -392,7 +392,8 @@ class HCADRetriever:
         # -- 1. dense channel ------------------------------------------------
         vector_cands: list[dict] = []
         try:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            from src.config import resolve_embed_device
+            device = resolve_embed_device()
             emb_model = (
                 self._decoupler._model
                 if hasattr(self, "_decoupler")

@@ -36,15 +36,8 @@ class SapBERTLinker:
 
         self.model_name = model_name or ENTITY_LINKING_MODEL
         logger.info(f"Loading SentenceTransformer model: {self.model_name}")
-        import torch
-        device = "cpu"
-        if torch.cuda.is_available():
-            try:
-                free_mem, _ = torch.cuda.mem_get_info()
-                if free_mem > 1200 * 1024 * 1024:
-                    device = "cuda"
-            except Exception:
-                pass
+        from src.config import resolve_embed_device
+        device = resolve_embed_device(min_free_mb=1200)
         try:
             self.model = SentenceTransformer(self.model_name, device=device, local_files_only=True)
         except Exception:

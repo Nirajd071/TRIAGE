@@ -124,6 +124,43 @@ JUDGE_MODELS: List[JudgeModel] = [
                   "q6_K": 7.6, "q8_0": 9.8, "fp16": 18.0},
         note="smallest / fastest option",
     ),
+    JudgeModel(  # 6
+        name="Qwen3-8B",
+        quants={
+            "q4_K_M": "qwen3:8b-q4_K_M",
+            "q8_0": "qwen3:8b-q8_0",
+        },
+        sizes_gb={"q4_K_M": 5.23, "q8_0": 8.9},
+        note="compact local Qwen3; thinking disabled automatically",
+    ),
+    JudgeModel(  # 7
+        name="Gemma 3 4B IT",
+        quants={
+            "qat": "gemma3:4b-it-qat",
+            "q4_K_M": "gemma3:4b-it-q4_K_M",
+            "q8_0": "gemma3:4b-it-q8_0",
+        },
+        sizes_gb={"qat": 4.01, "q4_K_M": 3.35, "q8_0": 5.0},
+        note="compact Google judge; 'qat' = quantization-aware 4-bit",
+    ),
+    JudgeModel(  # 8
+        name="Mistral 7B Instruct v0.3",
+        quants={
+            "q4_K_M": "mistral:7b-instruct-v0.3-q4_K_M",
+            "q8_0": "mistral:7b-instruct-v0.3-q8_0",
+        },
+        sizes_gb={"q4_K_M": 4.37, "q8_0": 7.7},
+        note="compact Mistral-family local judge",
+    ),
+    JudgeModel(  # 9
+        name="Phi-4 Mini 3.8B",
+        quants={
+            "q4_K_M": "phi4-mini:3.8b-q4_K_M",
+            "q8_0": "phi4-mini:3.8b-q8_0",
+        },
+        sizes_gb={"q4_K_M": 2.49, "q8_0": 4.1},
+        note="ultra-compact Microsoft judge (fits 4 GB VRAM)",
+    ),
 ]
 
 

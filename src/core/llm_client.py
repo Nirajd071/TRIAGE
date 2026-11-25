@@ -251,6 +251,9 @@ class UnifiedLLMClient:
             "model": model, "messages": messages, "stream": False,
             "options": self._ollama_options(temp, tokens),
         }
+        keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "").strip()
+        if keep_alive:
+            payload["keep_alive"] = int(keep_alive) if keep_alive.lstrip("-").isdigit() else keep_alive
         if json_mode:
             payload["format"] = "json"
         if is_thinking_model(model):
@@ -293,7 +296,11 @@ class UnifiedLLMClient:
                     "Start it (notebook: re-run the ollama cell) and retry."
                 ) from e
             # Ollama reports untagged pulls as "<name>:latest".
+            from src.config import LLM_MODEL, LLM_MODEL_ALIASES
             wanted = {self.model, f"{self.model}:latest"}
+            if self.model == LLM_MODEL:
+                for alias in LLM_MODEL_ALIASES:
+                    wanted.update((alias, f"{alias}:latest"))
             if not wanted & installed:
                 raise RuntimeError(
                     f"Model {self.model!r} is not pulled in Ollama. Run "

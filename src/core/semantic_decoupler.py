@@ -125,15 +125,8 @@ class SemanticDecoupler:
         try:
             from sentence_transformers import SentenceTransformer
 
-            import torch
-            _device = "cpu"
-            if torch.cuda.is_available():
-                try:
-                    free_mem, _ = torch.cuda.mem_get_info()
-                    if free_mem > 1200 * 1024 * 1024:  # require 1.2 GB free VRAM
-                        _device = "cuda"
-                except Exception:
-                    pass
+            from src.config import resolve_embed_device
+            _device = resolve_embed_device(min_free_mb=1200)
             logger.info("Loading embedding model: %s on %s", self._model_name, _device)
             try:
                 self._model = SentenceTransformer(self._model_name, device=_device, local_files_only=True)

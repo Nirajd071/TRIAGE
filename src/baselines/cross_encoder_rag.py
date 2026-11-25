@@ -31,10 +31,10 @@ class MedCPTCrossEncoder:
     def _ensure_loaded(self) -> None:
         if self._model is not None:
             return
-        import torch
+        from src.config import resolve_embed_device
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = resolve_embed_device()
         logger.info("Loading Cross-Encoder %s on %s...", self.model_name, self._device)
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         self._model = AutoModelForSequenceClassification.from_pretrained(self.model_name)

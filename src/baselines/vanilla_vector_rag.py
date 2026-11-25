@@ -115,8 +115,8 @@ class VanillaVectorRAG:
             "Loading embedding model: %s (d=%d)",
             EMBEDDING_MODEL_NAME, EMBEDDING_DIMENSION,
         )
-        import torch
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        from src.config import resolve_embed_device
+        _device = resolve_embed_device()
         try:
             self.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME, device=_device, local_files_only=True)
         except Exception:

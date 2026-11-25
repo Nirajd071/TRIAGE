@@ -659,5 +659,27 @@ BOOTSTRAP_RESAMPLES = int(os.getenv("BOOTSTRAP_RESAMPLES", "10000"))
 CONFIDENCE_LEVEL = 0.95
 LATENCY_TIMED_RUNS = int(os.getenv("LATENCY_TIMED_RUNS", "3"))
 POLARITY_TOP_K = int(os.getenv("POLARITY_TOP_K", "5"))
+
+
+def resolve_embed_device(min_free_mb: int = 0) -> str:
+    """Return the torch device for embedding/reranker models.
+
+    Honors ``HCAD_EMBED_DEVICE`` (e.g., ``cpu`` on 4 GB VRAM machines so Ollama
+    retains exclusive GPU headroom); otherwise uses CUDA when free VRAM allows.
+    """
+    override = os.getenv("HCAD_EMBED_DEVICE", "").strip().lower()
+    if override:
+        return override
+    import torch
+    if not torch.cuda.is_available():
+        return "cpu"
+    if min_free_mb > 0:
+        try:
+            free_mem, _ = torch.cuda.mem_get_info()
+            if free_mem <= min_free_mb * 1024 * 1024:
+                return "cpu"
+        except Exception:
+            return "cpu"
+    return "cuda"
 HYBRID_RRF_K = 60  # reciprocal-rank-fusion constant (Cormack et al., 2009)
 

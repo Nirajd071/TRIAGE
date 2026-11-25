@@ -350,3 +350,44 @@ def test_nvidia_nemotron_disables_thinking_and_groq_defaults_to_gpt_oss(monkeypa
         assert client.chat([{"role": "user", "content": "hi"}], json_mode=True) == '{"ok": true}'
     sent_payload = post_mock.call_args.kwargs["json"]
     assert sent_payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_compact_local_four_judge_panel_and_keep_alive(monkeypatch):
+    from src.config import judge_ensemble_specs
+    from src.core.llm_client import UnifiedLLMClient
+
+    monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
+    monkeypatch.setenv("JUDGE_MODEL_INDEX", "6,7,8,9")
+    monkeypatch.setenv("JUDGE_QUANT", "q4_K_M")
+
+    assert judge_ensemble_specs() == [
+        ("ollama", "qwen3:8b-q4_K_M"),
+        ("ollama", "gemma3:4b-it-q4_K_M"),
+        ("ollama", "mistral:7b-instruct-v0.3-q4_K_M"),
+        ("ollama", "phi4-mini:3.8b-q4_K_M"),
+    ]
+
+    captured = {}
+
+    def fake_post(url, json=None, timeout=None, **_):
+        captured.clear()
+        captured.update(json)
+        return _Resp({"message": {"content": '{"ok": true}'}})
+
+    monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "0")
+    client = UnifiedLLMClient(model="phi4-mini:3.8b-q4_K_M", provider="ollama",
+                              strict=True, is_judge=True)
+    with patch("src.core.llm_client.requests.post", fake_post):
+        client.chat([{"role": "user", "content": "hi"}], json_mode=True)
+    assert captured["keep_alive"] == 0
+
+
+def test_resolve_embed_device_override(monkeypatch):
+    from src.config import resolve_embed_device
+
+    monkeypatch.setenv("HCAD_EMBED_DEVICE", "cpu")
+    assert resolve_embed_device(min_free_mb=1200) == "cpu"

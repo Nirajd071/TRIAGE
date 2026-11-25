@@ -380,7 +380,8 @@ class UnifiedLLMClient:
                 "Authorization": f"Bearer {self.groq_key}",
                 "Content-Type": "application/json",
             }
-            for attempt in range(3):
+            for attempt in range(5):
+                resp = None
                 try:
                     resp = requests.post(groq_url, json=payload, headers=headers, timeout=60.0)
                     resp.raise_for_status()
@@ -393,8 +394,16 @@ class UnifiedLLMClient:
                     return data["choices"][0]["message"]["content"] or ""
                 except Exception as e:
                     logger.warning("Groq attempt %d failed: %s", attempt + 1, e)
-                    if attempt < 2:
-                        time.sleep(1.5 * (attempt + 1))
+                    if attempt < 4:
+                        wait_s = min(60.0, 3.0 * (2 ** attempt))
+                        if resp is not None and resp.status_code == 429:
+                            retry_hdr = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+                            if retry_hdr:
+                                try:
+                                    wait_s = max(wait_s, min(65.0, float(retry_hdr) + 1.0))
+                                except ValueError:
+                                    pass
+                        time.sleep(wait_s)
                     elif self.strict:
                         raise RuntimeError(f"Groq call failed for strict client {self.model}: {e}") from e
                     else:

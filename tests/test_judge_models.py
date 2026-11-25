@@ -201,3 +201,42 @@ def test_citation_tags_are_blinded_for_the_judge():
 
     assert _blind_citation_tags("A [Evidence 1] and [Context 2, 3].") == \
         "A [Doc 1] and [Doc 2, 3]."
+
+
+def test_ensemble_preflight_drops_unreachable_cloud_judge():
+    from src.evaluation.base_paper_evaluator import BasePaperEvaluator, MultiJudgeEvaluator
+
+    local_good, cloud_bad = MagicMock(), MagicMock()
+    cloud_bad.check_ready.side_effect = RuntimeError("503 Service Unavailable")
+    panel = MultiJudgeEvaluator([
+        BasePaperEvaluator(judge_llm=local_good, name="ollama:qwen3:14b-q4_K_M"),
+        BasePaperEvaluator(judge_llm=cloud_bad, name="gemini:gemini-3.1-flash-lite"),
+    ])
+    panel.check_ready()
+    assert panel.judge_names == ["ollama:qwen3:14b-q4_K_M"]
+
+
+def test_groq_retries_on_429_respecting_retry_after(monkeypatch):
+    import requests
+    from src.core.llm_client import UnifiedLLMClient
+
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
+    client = UnifiedLLMClient(model="qwen/qwen3.8-27b", provider="groq",
+                              strict=True, is_judge=True)
+
+    err_resp = MagicMock()
+    err_resp.status_code = 429
+    err_resp.headers = {"retry-after": "2"}
+    err_resp.raise_for_status.side_effect = requests.HTTPError("429 Too Many Requests", response=err_resp)
+
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"choices": [{"message": {"content": '{"ok": true}'}}], "usage": {}}
+
+    sleeps = []
+    with patch("src.core.llm_client.requests.post", side_effect=[err_resp, ok_resp]):
+        with patch("src.core.llm_client.time.sleep", side_effect=sleeps.append):
+            out = client.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    assert out == '{"ok": true}'
+    assert sleeps == [3.0]  # max(base=3.0, Retry-After 2 + 1.0)

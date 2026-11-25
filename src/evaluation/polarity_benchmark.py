@@ -495,8 +495,7 @@ def make_hcad_ranker(corpus: Sequence[Dict], retriever=None,
 
         original = retriever._get_candidate_contexts
         retriever._get_candidate_contexts = lambda *a, **kw: candidates()
-        # The ranking uses PRE-gate scores, so the decision gate (a live
-        # TypeSafe API call when TYPESAFE_API_KEY is set) is skipped here.
+        # The ranking uses PRE-gate scores, so the decision gate is skipped here.
         previous_gate = os.environ.get("HCAD_DECISION_GATE")
         os.environ["HCAD_DECISION_GATE"] = "0"
         try:

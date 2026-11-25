@@ -233,12 +233,10 @@ class HCADRetriever:
 
     @property
     def gate_mode(self) -> str:
-        """Active JEV gate mode: 'live-typesafe' or 'local-calibrated'.
+        """Active JEV gate mode (always 'local-calibrated').
 
-        Exposed for benchmark provenance: the mode is recorded in every
-        run_manifest and fail-loud compared against HCAD_EXPECTED_GATE_MODE
-        so a stray TYPESAFE_API_KEY cannot silently switch the measurement
-        chain between runs.
+        Exposed for benchmark provenance so every run_manifest records the
+        active gate mode explicitly.
         """
         if self._decision_gate is None:
             return "uninitialized"

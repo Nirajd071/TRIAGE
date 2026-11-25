@@ -66,8 +66,7 @@ Three channels are pooled:
   structure-selected complement", so the comparison against dense RAG
   isolates what structured selection adds. `HCAD_DENSE_ANCHOR_K=0` restores
   the old behaviour.
-- **JEV System One decision gate** (`typesafe-sdk`; local calibrated mode
-  without `TYPESAFE_API_KEY`):
+- **JEV System One decision gate** (local-calibrated mode):
   - drops candidates below relevance 0.25 (anchors are exempt);
   - allows at most 3 items per relation type, so one relation cannot fill the context;
   - keeps at most 8 items and 350 words.
@@ -160,21 +159,11 @@ pip install --no-deps https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/release
 pip install --no-deps https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_ner_jnlpba_md-0.5.4.tar.gz
 ```
 
-Use the repository-root `.env` as the single local environment file — copy
-`.env.example` and keep one profile:
-- **Profile A (all LLMs local via ollama, zero LLM API keys):**
-  `LLM_PROVIDER=ollama` + `JUDGE_MODEL_INDEX=<n>` (see *Judge selection*
-  below). The generator (`llama3.1:8b-instruct-q4_K_M`) and the judge(s) run
-  via ollama, all 4-bit. Everything else keeps its existing behaviour: W&B
-  stays online if `WANDB_API_KEY` is set, and the JEV gate stays live if
-  `TYPESAFE_API_KEY` is set.
-- **Profile B (cloud-judge upgrade, opt-in):** `JUDGE_PROVIDER=huggingface`
-  puts the judge on paper-parity `Qwen/Qwen2.5-72B-Instruct` via HF Inference
-  Providers while the generator stays local.
+Use the repository-root `.env` as the single local environment file — all LLMs run locally via Ollama with zero cloud LLM API keys:
+- `LLM_PROVIDER="ollama"` + `JUDGE_MODEL_INDEX=<n>` (see *Judge selection* below). The generator (`llama3.1:8b-instruct-q4_K_M`) and the judge(s) run locally via Ollama, all 4-bit quantized. W&B stays online if `WANDB_API_KEY` is set.
 ```bash
-LLM_PROVIDER="huggingface"                              # "huggingface", "nvidia" (NIM), or "ollama"
-# JUDGE_PROVIDER="huggingface"                          # Optional hybrid: generator local (ollama),
-                                                        # judge remote (huggingface = Qwen2.5-72B, or nvidia)
+LLM_PROVIDER="ollama"
+JUDGE_MODEL_INDEX="0,1,2,3"                             # Local 4-bit Ollama judge panel
 WANDB_API_KEY="your_rotated_wandb_api_key"              # Optional, enables experiment tracking
 WANDB_PROJECT="hcad-rag"
 # WANDB_ENTITY="your_wandb_username_or_team"            # Optional
@@ -213,10 +202,9 @@ python src/main.py figures
 Arms (one label each, used verbatim in JSON, tables and figures):
 **Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)**, BM25 RAG (top-5),
 Dense RAG (S-PubMedBERT, top-5), Hybrid BM25+Dense RAG (RRF, top-5), HCAD-RAG.
-Judges: selected by `JUDGE_MODEL_INDEX` (below), or an explicit
-`JUDGE_ENSEMBLE` list. The default panel is
-`ollama:gemma2:9b-instruct-q4_K_M,ollama:qwen2.5:14b-instruct-q4_K_M`, and
-`JUDGE_ENABLE_API_JUDGE=1` adds `meta/llama-3.3-70b-instruct` via NVIDIA NIM.
+Judges: selected locally via `JUDGE_MODEL_INDEX` (below), or an explicit
+`JUDGE_ENSEMBLE` list of `ollama:<model>` tags. The default panel is
+`ollama:gemma2:9b-instruct-q4_K_M,ollama:qwen2.5:14b-instruct-q4_K_M`.
 Every call runs in JSON mode, and a judge failure never becomes a neutral
 fallback score.
 Outputs:
@@ -288,14 +276,6 @@ and every judge call in `src/` follows, with no source edits:
 Weight learning tunes only `filter_k`, the learned parameter currently consumed by
 the retriever. Anisotropic and component-scoring weights remain at their configured
 values; retrieval and model architecture are unchanged.
-### Hybrid judging (small-GPU machines)
-`JUDGE_PROVIDER` decouples the judge from the generator. With
-`LLM_PROVIDER=ollama` (local `llama3.1:8b-instruct-q4_K_M` via ollama) plus
-`JUDGE_PROVIDER=huggingface`, the judge runs on the paper-parity
-`Qwen/Qwen2.5-72B-Instruct` through Hugging Face Inference Providers
-(pay-per-token, needs HF billing; roughly $2 for a 50-sample run) while all
-generation stays free and local. `JUDGE_PROVIDER=nvidia` does the same via
-NVIDIA NIM. Without the variable, the judge follows `LLM_PROVIDER`.
 ### Retrieval scoring knobs (ablations)
 | Variable | Default | Effect |
 |----------|---------|--------|
@@ -387,7 +367,7 @@ HCAD/
 │   │   ├── entropy_gate.py            # (P3, opt-in) entropy-based abstention gate
 │   │   ├── weight_learner.py          # filter_k weight learning
 │   │   ├── prompt_builder.py          # Standardized 4-section clinical prompt builder
-│   │   ├── llm_client.py              # Unified LLM interface (HuggingFace / NVIDIA NIM / Ollama)
+│   │   ├── llm_client.py              # Local Ollama LLM interface
 │   │   └── hcad_retriever.py          # End-to-end integrated HCAD-RAG pipeline
 │   ├── baselines/
 │   │   ├── baseline_llm.py            # Parametric LLM baseline (zero-retrieval)

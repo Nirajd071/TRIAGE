@@ -32,7 +32,6 @@ datasets>=2.19
 joblib>=1.3
 huggingface_hub>=0.23
 requests>=2.31
-rank-bm25>=0.2.2
 # SciSpacy biomedical NER models (BOTH required - per-model loading is fault-isolated).
 # The 0.5.4 model tarballs declare spacy<3.8 but run fine under 3.8 (tested);
 # install them with --no-deps in a separate command, see README Quick Start.

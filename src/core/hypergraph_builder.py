@@ -88,12 +88,11 @@ class HypergraphBuilder:
         for neighbor in neighborhood:
             if neighbor == node_id:
                 continue
-            # Get all edges between entity and neighbor
-            # union BOTH directions - the previous
-            # forward-first check dropped reciprocal edges on MultiDiGraph.
-            edges = dict(self.graph.get_edge_data(node_id, neighbor) or {})
-            edges.update(self.graph.get_edge_data(neighbor, node_id) or {})
-            for edge_key, edge_data in edges.items():
+            # Get all edges between entity and neighbor across BOTH directions
+            # without key collisions on MultiDiGraph.
+            edge_dicts = list((self.graph.get_edge_data(node_id, neighbor) or {}).values())
+            edge_dicts += list((self.graph.get_edge_data(neighbor, node_id) or {}).values())
+            for edge_data in edge_dicts:
                 relation = edge_data.get("relation", "unknown")
                 relation_groups.setdefault(relation, []).append(neighbor)
 
@@ -424,16 +423,12 @@ class HypergraphBuilder:
             node_id = self._resolve_entity(name)
             if node_id not in self.graph:
                 continue
-            # graph.edges(node) yields OUT-edges only on
-            # a MultiDiGraph; include in-edges so facts where the entity is the
-            # tail (e.g., a disease treated by a drug) are not lost. Capped at
-            # 50 per direction to bound hub explosion.
-            edge_iter = list(self.graph.out_edges(node_id, data=True))
+            # graph.edges(node) yields OUT-edges only on a MultiDiGraph; include
+            # balanced slices of out- and in-edges (50 each) so hubs never starve in-edges.
+            edge_iter = list(self.graph.out_edges(node_id, data=True))[:50]
             if hasattr(self.graph, "in_edges"):
-                edge_iter += list(self.graph.in_edges(node_id, data=True))
-            for count, (u, v, data) in enumerate(edge_iter):
-                if count >= 100:
-                    break
+                edge_iter += list(self.graph.in_edges(node_id, data=True))[:50]
+            for u, v, data in edge_iter:
                 key = (u, data.get("relation", ""), v)
                 if key not in seen:
                     triples.append(key)

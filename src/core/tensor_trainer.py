@@ -124,6 +124,7 @@ def train_tensor(
     retriever._tensor = None
     retriever._tensor_override = None
 
+    rewards: list[float] = []
     history: list[dict] = []
     for epoch in range(epochs):
         rewards: list[float] = []

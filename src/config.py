@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -681,5 +682,11 @@ def resolve_embed_device(min_free_mb: int = 0) -> str:
         except Exception:
             return "cpu"
     return "cuda"
+
+
+def safe_artifact_slug(name: str) -> str:
+    """Return a filesystem-safe lowercase slug for artifact/table filenames."""
+    slug = re.sub(r"[^a-z0-9._-]+", "_", (name or "").strip().lower()).strip("_")
+    return slug or "system"
 HYBRID_RRF_K = 60  # reciprocal-rank-fusion constant (Cormack et al., 2009)
 

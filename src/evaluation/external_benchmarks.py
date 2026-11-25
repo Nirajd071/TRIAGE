@@ -113,6 +113,7 @@ def _make_pair_scorers(
         ]
         original = hcad._get_candidate_contexts
         hcad._get_candidate_contexts = lambda *a, **kw: cands
+        hcad._last_query_embedding = None
         prev_gate = os.environ.get("HCAD_DECISION_GATE")
         os.environ["HCAD_DECISION_GATE"] = "0"
         try:
@@ -191,9 +192,9 @@ def evaluate_nevir_pairs(
         logger.info(
             "NevIR %-10s pair_acc=%.3f query_acc=%.3f err=%.3f",
             arm,
-            arm_results[arm]["pair_accuracy"]["mean"],
-            arm_results[arm]["query_accuracy"]["mean"],
-            arm_results[arm]["polarity_error_rate"]["mean"],
+            arm_results[arm]["pair_accuracy"]["mean"] or 0.0,
+            arm_results[arm]["query_accuracy"]["mean"] or 0.0,
+            arm_results[arm]["polarity_error_rate"]["mean"] or 0.0,
         )
 
     sig: Dict[str, Any] = {}
@@ -271,8 +272,8 @@ def evaluate_excluir_pairs(
         logger.info(
             "ExcluIR %-10s acc=%.3f err=%.3f",
             arm,
-            arm_results[arm]["exclusion_accuracy"]["mean"],
-            arm_results[arm]["polarity_error_rate"]["mean"],
+            arm_results[arm]["exclusion_accuracy"]["mean"] or 0.0,
+            arm_results[arm]["polarity_error_rate"]["mean"] or 0.0,
         )
 
     sig: Dict[str, Any] = {}
@@ -358,25 +359,38 @@ def run_mirage_benchmark(
     arms: Sequence[str] = ("closed_book", "bm25", "dense", "hybrid", "reranker", "graphrag", "hcad"),
     output_path: Optional[Path] = None,
     checkpoint_path: Optional[Path] = None,
+    llm_client=None,
 ) -> Dict[str, Any]:
     """Evaluate end-to-end MCQ accuracy on MedQA-USMLE + PubMedQA."""
     from src.baselines.baseline_llm import _extract_answer_letter
     from src.core.llm_client import UnifiedLLMClient
-    from src.evaluation.run_base_paper_benchmark import build_arms
+    from src.evaluation.run_base_paper_benchmark import (
+        _env_overrides,
+        _hcad_config_id,
+        build_arms,
+    )
 
     samples = _load_mirage_samples(n_per_dataset=n_per_dataset)
     built = build_arms(arms)
-    llm = UnifiedLLMClient(model=LLM_MODEL, temperature=0.0, max_tokens=96)
+    llm = llm_client or UnifiedLLMClient(model=LLM_MODEL, temperature=0.0, max_tokens=96)
+    cfg_id = _hcad_config_id()
 
     ckpt = checkpoint_path or (RESULTS_DIR / "mirage_checkpoint.jsonl")
     ckpt.parent.mkdir(parents=True, exist_ok=True)
     completed: Dict[str, Dict[str, Any]] = {}
     if ckpt.exists():
         for line in ckpt.read_text(encoding="utf-8").splitlines():
-            if line.strip():
+            if not line.strip():
+                continue
+            try:
                 rec = json.loads(line)
-                if list(rec.get("arms", [])) == list(arms):
-                    completed[rec["id"]] = rec
+            except json.JSONDecodeError:
+                continue
+            if (list(rec.get("arms", [])) == list(arms)
+                    and rec.get("model", LLM_MODEL) == LLM_MODEL
+                    and rec.get("n_per_dataset", n_per_dataset) == n_per_dataset
+                    and rec.get("hcad_config_id", cfg_id) == cfg_id):
+                completed[rec["id"]] = rec
 
     with open(ckpt, "a", encoding="utf-8") as cf:
         for idx, sample in enumerate(samples, 1):
@@ -385,7 +399,7 @@ def run_mirage_benchmark(
             per_arm: Dict[str, Any] = {}
             for arm_id in arms:
                 arm = built[arm_id]
-                with arm.active_env():
+                with _env_overrides(arm.env):
                     contexts = arm.retrieve(sample["retrieval_query"]) if arm.retrieve else []
                     msgs = arm.build_messages(sample["question"], contexts)
                 raw = llm.chat(msgs, temperature=0.0, max_tokens=96)
@@ -402,6 +416,9 @@ def run_mirage_benchmark(
                 "dataset": sample["dataset"],
                 "gold_letter": sample["gold_letter"],
                 "arms": list(arms),
+                "model": LLM_MODEL,
+                "n_per_dataset": n_per_dataset,
+                "hcad_config_id": cfg_id,
                 "results": per_arm,
             }
             completed[sample["id"]] = rec

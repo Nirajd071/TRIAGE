@@ -213,16 +213,16 @@ def triage_query(request: TriageQueryRequest) -> Dict[str, Any]:
             ner_result = {}
         entities = _map_entities(ner_result)
 
-        # Stage-1 raw pool: the same candidate fetch the retriever performed.
+        # Stage-1 raw pool: reuse the candidate pool already captured by retrieve().
         raw_candidates: List[Dict[str, Any]] = []
         admitted_docs = {_context_document(c) for c in hcad_contexts}
-        try:
-            pool = hcad._get_candidate_contexts(
-                query, ner_result, n_vector=20
-            )
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Candidate fetch failed: %s", exc)
-            pool = hcad_contexts
+        pool = getattr(hcad, "_last_candidate_pool", None)
+        if not pool:
+            try:
+                pool = hcad._get_candidate_contexts(query, ner_result, n_vector=20)
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Candidate fetch failed: %s", exc)
+                pool = hcad_contexts
         for i, ctx in enumerate(pool[:20]):
             doc = _context_document(ctx)
             raw_candidates.append({
@@ -338,7 +338,8 @@ def _node_type(raw: str) -> str:
 def subgraph(query: str = Query(..., min_length=3)) -> Dict[str, Any]:
     hcad = provider.hcad_rag()
     try:
-        graph = hcad.graph  # lazy-loads the PrimeKG MultiDiGraph
+        kg = hcad.graph  # lazy-loads KnowledgeGraph (or MultiDiGraph directly)
+        graph = kg if hasattr(kg, "nodes") else getattr(kg, "graph", kg)
     except Exception as exc:
         logger.exception("Knowledge graph unavailable: %s", exc)
         raise HTTPException(status_code=503, detail="Knowledge graph unavailable") from exc
@@ -348,7 +349,7 @@ def subgraph(query: str = Query(..., min_length=3)) -> Dict[str, Any]:
     q_lower = query.lower()
     for node, data in graph.nodes(data=True):
         name = str(data.get("name", ""))
-        if name and name.lower() in q_lower:
+        if len(name) >= 3 and name.lower() in q_lower:
             center = node
             break
     if center is None:
@@ -359,13 +360,15 @@ def subgraph(query: str = Query(..., min_length=3)) -> Dict[str, Any]:
         )
 
     # 2-hop ego network, capped for the canvas.
-    nodes: Dict[str, Dict[str, Any]] = {}
+    nodes: Dict[Any, Dict[str, Any]] = {}
     frontier = {center}
     visited = {center}
     for _hop in range(2):
         next_frontier: set = set()
         for node in frontier:
             for _, target, data in graph.out_edges(node, data=True):
+                if len(nodes) >= 30:
+                    break
                 if target not in visited:
                     next_frontier.add(target)
                 if target not in nodes:
@@ -377,6 +380,8 @@ def subgraph(query: str = Query(..., min_length=3)) -> Dict[str, Any]:
                         "trace": 0.0,
                     }
             for source, _, data in graph.in_edges(node, data=True):
+                if len(nodes) >= 30:
+                    break
                 if source not in visited:
                     next_frontier.add(source)
                 if source not in nodes:
@@ -387,6 +392,8 @@ def subgraph(query: str = Query(..., min_length=3)) -> Dict[str, Any]:
                         "type": _node_type(str(n_data.get("node_type", ""))),
                         "trace": 0.0,
                     }
+            if len(nodes) >= 30:
+                break
         visited |= next_frontier
         frontier = next_frontier
         if len(nodes) >= 30:

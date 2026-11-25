@@ -58,7 +58,14 @@ class SapBERTLinker:
         if faiss is None:
             raise ImportError("faiss is required for SapBERTLinker")
 
-        self.name_to_id = kg.name_to_node
+        if getattr(kg, "name_to_node", None) is not None:
+            self.name_to_id = kg.name_to_node
+        else:
+            raw_graph = getattr(kg, "graph", kg)
+            self.name_to_id = {
+                str(d.get("name", n)): n
+                for n, d in raw_graph.nodes(data=True)
+            }
 
         if self.index_path.exists() and self.names_path.exists():
             # bind the cache to the current graph via an
@@ -107,6 +114,8 @@ class SapBERTLinker:
         logger.info("Index built successfully.")
 
     def link(self, entity_text: str, top_k: int = 3, threshold: float = 0.7) -> list[dict]:
+        if not entity_text or not str(entity_text).strip():
+            return []
         if self.index is None:
             logger.error("FAISS index is not built. Call build_index() first.")
             return []

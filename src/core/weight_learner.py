@@ -30,7 +30,7 @@ class HCADWeightLearner(nn.Module):
 
     def __init__(self):
         super().__init__()
-        raw_k = math.log(math.expm1(FILTERING_K))
+        raw_k = math.log(math.expm1(max(float(FILTERING_K), 1e-4)))
         self.raw_k = nn.Parameter(torch.tensor(raw_k))
 
     def get_k(self) -> float:
@@ -182,7 +182,7 @@ def train_weights(retriever, val_data: list[dict], epochs=10, lr=0.01, save_path
 def _answer_letter(answer, options: dict) -> str | None:
     """Normalize MedQA answer labels or answer text to A/B/C/D."""
     labels = ("A", "B", "C", "D")
-    if isinstance(answer, int) and 0 <= answer < len(labels):
+    if isinstance(answer, int) and not isinstance(answer, bool) and 0 <= answer < len(labels):
         return labels[answer]
     answer_text = str(answer or "").strip()
     if answer_text.upper() in labels:

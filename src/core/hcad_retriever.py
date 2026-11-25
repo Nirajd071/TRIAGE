@@ -615,6 +615,7 @@ class HCADRetriever:
         self._last_phi_scores = None
         self._last_dense_sims = None
         self._last_dense_weight = 0.0
+        self._last_query_embedding = None
         timings: dict[str, float] = {}
         self._last_stage_timings = timings
         _t = time.perf_counter()
@@ -841,6 +842,9 @@ class HCADRetriever:
         _t = time.perf_counter()
         if self._decision_gate is not None and decision_gate_enabled() and self.enable_decision_gate:
             filtered = self._decision_gate.verify_and_prune_candidates(filtered, query)
+        elif self._decision_gate is not None and filtered:
+            # Keep the hcad_no_gate ablation strictly on the same 350-word budget.
+            filtered = self._decision_gate.enforce_word_budget(filtered)
         timings["decision_gate"] = time.perf_counter() - _t
 
         return filtered
@@ -903,9 +907,11 @@ class HCADRetriever:
                     votes.append(letter)
                     responses.append(f"Sample {i+1} ({letter}):\n{text}")
 
-                # deterministic tie-break - first sample wins.
+                # deterministic tie-break - valid option beats extraction failure ("X").
                 counts = Counter(votes)
-                majority_vote = max(votes, key=lambda v: (counts[v], -votes.index(v)))
+                valid_votes = [v for v in votes if v != "X"]
+                pool_votes = valid_votes or votes
+                majority_vote = max(pool_votes, key=lambda v: (counts[v], -votes.index(v)))
                 full_response = "\n\n".join(responses)
                 return majority_vote, full_response
 

@@ -336,7 +336,7 @@ def run_retrieval_eval(
             "recall_at_k": round(d_recall, 4),
             "ndcg_at_k": round(d_ndcg, 4),
         }
-        is_go = (d_recall >= GO_DELTA_RECALL and d_ndcg >= GO_DELTA_NDCG) or (d_ndcg >= 0.0)
+        is_go = d_recall >= GO_DELTA_RECALL and d_ndcg >= GO_DELTA_NDCG
         results["go_stop"] = {
             "required_delta_recall": GO_DELTA_RECALL,
             "required_delta_ndcg": GO_DELTA_NDCG,

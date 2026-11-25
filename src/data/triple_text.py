@@ -37,7 +37,8 @@ TRIPLE_REL_MAP = {
 
 def triple_to_sentence(head: str, relation: str, tail: str) -> str:
     """Convert a KG triple to a readable natural language sentence."""
-    readable_rel = TRIPLE_REL_MAP.get(relation, relation.replace("_", " "))
+    rel = str(relation or "")
+    readable_rel = TRIPLE_REL_MAP.get(rel, rel.replace("_", " "))
     return f"{head} {readable_rel} {tail}."
 
 

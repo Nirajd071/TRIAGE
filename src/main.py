@@ -179,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
 Examples:
   python src/main.py prepare
   python src/main.py demo --query "Can Metformin be given to renal failure patients?"
-  python src/main.py evaluate --system hcad-rag --samples 200
+  python src/main.py base-paper --arms hcad --samples 200
   python src/main.py benchmark --samples 200
         """,
     )
@@ -488,8 +488,12 @@ def cmd_hub_eval(args):
 
 def cmd_save_pipeline(args):
     """Serialize the entire HCAD-RAG pipeline into a joblib model artifact."""
+    from pathlib import Path
     from src.core.model_serializer import save_hcad_model_joblib
-    save_hcad_model_joblib(output_path=args.file)
+    out = args.file
+    if args.output_dir and args.file == "models/hcad_rag_model.joblib":
+        out = str(Path(args.output_dir) / "hcad_rag_model.joblib")
+    save_hcad_model_joblib(output_path=out)
 
 # Main
 

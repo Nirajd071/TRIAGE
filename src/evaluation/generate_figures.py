@@ -203,14 +203,17 @@ def polarity_rows(polarity: Dict[str, Any]) -> List[Dict[str, Any]]:
     rows = []
     for arm, res in (polarity.get("arms") or {}).items():
         o = res["overall"]
+        by_phr = res.get("by_phrasing") or {}
+        err_lex = ((by_phr.get("lexical") or {}).get("polarity_error_rate") or {}).get("mean")
+        err_para = ((by_phr.get("paraphrase") or {}).get("polarity_error_rate") or {}).get("mean")
         rows.append({
             "arm": arm, "n_queries": o["n_queries"],
             "polarity_recall_at_k": round(o["polarity_recall_at_k"]["mean"], 3),
             "polarity_error_rate": round(o["polarity_error_rate"]["mean"], 3),
             "error_ci_low": round(o["polarity_error_rate"]["ci_low"], 3),
             "error_ci_high": round(o["polarity_error_rate"]["ci_high"], 3),
-            "error_lexical": round(res["by_phrasing"]["lexical"]["polarity_error_rate"]["mean"], 3),
-            "error_paraphrase": round(res["by_phrasing"]["paraphrase"]["polarity_error_rate"]["mean"], 3),
+            "error_lexical": round(err_lex, 3) if err_lex is not None else None,
+            "error_paraphrase": round(err_para, 3) if err_para is not None else None,
             "pair_accuracy": round(res["pair_accuracy"]["mean"], 3),
             "mrr": round(o["mrr"]["mean"], 3),
         })

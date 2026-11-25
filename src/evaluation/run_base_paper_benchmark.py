@@ -201,8 +201,6 @@ def _format_retrieved_evidence(contexts: List[Dict[str, Any]], tag: str) -> str:
         lines.append(f"[{tag} {index}] {selected.strip()}")
         used = len(selected.split())
         remaining_words -= used
-        if used < len(words):
-            break
     return "\n".join(lines) or "Retrieved contexts contained no readable evidence."
 
 # Both systems retrieve top-5; all retrieval metrics use the same cut.
@@ -349,16 +347,35 @@ def _evidence_stats(contexts: List[Dict[str, Any]], relevance: List[int]) -> Dic
 
 
 def _hcad_config_id() -> str:
-    """Fingerprint of the HCAD evidence-assembly settings.
+    """Fingerprint of the HCAD evidence-assembly and model settings.
 
-    HCAD answers produced under different evidence logic must not be
+    HCAD answers produced under different evidence or generator logic must not be
     resumed into (or averaged with) the current run. Ablation arms are
     expressed through the same env toggles inside their own scope, so the
     fingerprint is taken from the process-level (full-system) settings.
     """
-    from src.config import dense_anchor_k, dense_anchor_min, dense_weight, group_kg_facts_enabled
-    return (f"evidence-v2|dw={dense_weight():g}|anchor={dense_anchor_k()}"
-            f"@{dense_anchor_min():g}|group={int(group_kg_facts_enabled())}")
+    from src.config import (
+        LLM_MODEL,
+        dense_anchor_k,
+        dense_anchor_min,
+        dense_weight,
+        expansion_rule,
+        group_kg_facts_enabled,
+        ortho_strength,
+        decision_gate_enabled,
+        presence_masking_enabled,
+        relation_vocab_enabled,
+        tau_sat,
+    )
+    t_mode = os.getenv("HCAD_TENSOR_MODE", "static").strip().lower()
+    return (
+        f"evidence-v3|gen={LLM_MODEL}|dw={dense_weight():g}"
+        f"|anchor={dense_anchor_k()}@{dense_anchor_min():g}"
+        f"|group={int(group_kg_facts_enabled())}|tm={t_mode}"
+        f"|tau={tau_sat()}|exp={expansion_rule()}"
+        f"|mask={int(presence_masking_enabled())}|rv={int(relation_vocab_enabled())}"
+        f"|ortho={ortho_strength():g}|gate={int(decision_gate_enabled())}"
+    )
 
 
 def _config_matches(record: Dict[str, Any],
@@ -573,6 +590,11 @@ def _completed_questions_from_checkpoint(
                             continue
                         if required_judges is not None and not _config_matches(
                                 record, required_judges):
+                            continue
+                        scores = record.get("scores") or {}
+                        if scores and not any(
+                            (v or {}).get("n_valid_judges", 1) > 0 for v in scores.values()
+                        ):
                             continue
                     completed.add(record["question"])
     return completed
@@ -1323,13 +1345,13 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
     """
     arm_ids = resolve_arms(arms, include_ablations)
     judge = judge or MultiJudgeEvaluator.from_config()
-    judge_names = judge.judge_names
     logger.info("Arms: %s", [ARM_LABELS[a] for a in arm_ids])
-    logger.info("Judges: %s", judge_names)
     # Fail before hours of retrieval/generation when a judge is not pulled,
     # does not fit in memory, or cannot produce JSON.
     if os.getenv("JUDGE_SKIP_PREFLIGHT", "0") != "1" and hasattr(judge, "check_ready"):
         judge.check_ready()
+    judge_names = judge.judge_names
+    logger.info("Judges: %s", judge_names)
     from src.config import JUDGE_MAX_FAILURE_RATE
     hcad_config_id = _hcad_config_id()
     logger.info("HCAD evidence config: %s", hcad_config_id)

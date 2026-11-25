@@ -14,6 +14,7 @@ services:
           all: true
     env:
       SSH_PUBKEY: "ssh-ed25519 AAAA...your-key..."
+      JUDGE_MODEL_INDEX: "0"
       WANDB_MODE: "disabled"
     params:
       storage:
@@ -35,7 +36,11 @@ profiles:
         memory:
           size: 64 Gi
         storage:
-          size: 400 Gi
+          - size: 50 Gi
+          - name: data
+            size: 400 Gi
+            attributes:
+              persistent: true
   placement:
     default:
       attributes:

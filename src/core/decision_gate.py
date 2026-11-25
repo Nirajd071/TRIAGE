@@ -107,7 +107,12 @@ class DecisionGate:
         self.use_jev = use_jev
 
         self.client: Optional[Any] = None
-        jev_key = api_key or os.environ.get("TYPESAFE_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        or_fallback = (
+            os.environ.get("OPENROUTER_API_KEY")
+            if os.environ.get("TYPESAFE_USE_OPENROUTER") == "1"
+            else None
+        )
+        jev_key = api_key or os.environ.get("TYPESAFE_API_KEY") or or_fallback
 
         if self.use_jev and HAS_TYPESAFE and jev_key:
             try:
@@ -175,7 +180,8 @@ class DecisionGate:
                 choice_val = answers.get("best_context_index")
 
                 best_choice = getattr(choice_val, "choice", "none") if choice_val else "none"
-                is_supported = getattr(noul_val, "noul", 0.0) if noul_val else 0.0
+                raw_noul = getattr(noul_val, "noul", 0.0) if noul_val else 0.0
+                is_supported = float(0.0 if raw_noul is None else raw_noul)
 
                 logger.info(
                     "JEV Decision: Supported (Noul)=%s, Best Index (Choice)=%s",
@@ -257,6 +263,25 @@ class DecisionGate:
         # Dense anchors are guaranteed a slot and their words (up to the
         # budget) are reserved up front, but they keep their score position:
         # a higher-scoring structured item still comes first.
+        verified = self.enforce_word_budget(ordered)
+        if not verified and candidates and self.max_evidence_items > 0:
+            top = candidates[0]
+            top_score = top.get("phi_final", top.get("score", 0.0))
+            if top_score >= self.min_relevance_score:
+                top_words = _evidence_words(top)
+                clipped = _clip_to_sentence(top_words, self.token_budget_words)
+                if clipped:
+                    verified = [{**top, "document": clipped}]
+
+        logger.debug(
+            "DecisionGate pruned %d candidates down to %d verified items.",
+            len(candidates),
+            len(verified),
+        )
+        return verified
+
+    def enforce_word_budget(self, ordered: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Enforce max_evidence_items and token_budget_words at sentence boundaries."""
         budget = self.token_budget_words
         reservation: Dict[int, int] = {}   # id(anchor item) -> reserved words
         for c in ordered:
@@ -294,19 +319,7 @@ class DecisionGate:
                     continue
                 bounded.append({**candidate, "document": clipped})
                 remaining_words -= len(clipped.split())
-        verified = bounded
-
-        if not verified and candidates:
-            top_score = candidates[0].get("phi_final", candidates[0].get("score", 0.0))
-            if top_score >= self.min_relevance_score:
-                verified = candidates[:1]
-
-        logger.debug(
-            "DecisionGate pruned %d candidates down to %d verified items.",
-            len(candidates),
-            len(verified),
-        )
-        return verified
+        return bounded
 
     def format_constrained_evidence(
         self,
@@ -329,7 +342,9 @@ class DecisionGate:
             doc = ctx.get("document", "")
             score = ctx.get("phi_final", ctx.get("score", 0.0))
 
-            if head and rel and tail:
+            if doc and meta.get("grouped_tails"):
+                evidence_str = f"[Evidence {i}] (Score: {score:.2f}) {doc}"
+            elif head and rel and tail:
                 evidence_str = (
                     f"[Evidence {i}] (Score: {score:.2f}) {head} --[{rel.replace('_', ' ')}]--> {tail}."
                 )

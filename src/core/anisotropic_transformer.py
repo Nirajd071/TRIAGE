@@ -211,28 +211,35 @@ class AnisotropicTransformer:
         try:
             graph_nx, node_id = self._resolve_node(graph, node_name)
             if graph_nx is None or node_id not in graph_nx:
-                return 1.0
+                return 0.5
             # consider BOTH directions, since edges(node)
             # on a MultiDiGraph yields out-edges only.
             edges = list(graph_nx.edges(node_id, data=True))
             try:
                 import networkx as nx
-                if isinstance(graph_nx, (nx.DiGraph, nx.MultiDiGraph)):
+                if isinstance(graph_nx, nx.MultiDiGraph):
                     edges += [
                         (u, v, {"relation": d.get("relation"), "confidence": d.get("confidence"), "weight": d.get("weight")})
-                        for u, v, k, d in graph_nx.in_edges(node_id, data=True, keys=True)
+                        for u, v, _k, d in graph_nx.in_edges(node_id, data=True, keys=True)
+                    ]
+                elif isinstance(graph_nx, nx.DiGraph):
+                    edges += [
+                        (u, v, {"relation": d.get("relation"), "confidence": d.get("confidence"), "weight": d.get("weight")})
+                        for u, v, d in graph_nx.in_edges(node_id, data=True)
                     ]
             except Exception:
                 pass
             if not edges:
                 return 0.5  # neutral prior for OOV nodes (was a silently high 1.0)
-            total_weight = sum(
-                edata.get("weight", edata.get("confidence", 1.0))
-                for _, _, edata in edges
-            )
+            total_weight = 0.0
+            for _, _, edata in edges:
+                w = edata.get("weight")
+                if w is None:
+                    w = edata.get("confidence")
+                total_weight += float(1.0 if w is None else w)
             return float(np.clip(total_weight / len(edges), 0.0, 1.0))
         except Exception:
-            return 1.0
+            return 0.5
 
     def _compute_idf(
         self,

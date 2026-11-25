@@ -391,3 +391,61 @@ def test_resolve_embed_device_override(monkeypatch):
 
     monkeypatch.setenv("HCAD_EMBED_DEVICE", "cpu")
     assert resolve_embed_device(min_free_mb=1200) == "cpu"
+
+
+def test_audit_regression_fixes(monkeypatch, tmp_path):
+    import numpy as np
+    import networkx as nx
+    from types import SimpleNamespace
+    from src.core.anisotropic_transformer import AnisotropicTransformer
+    from src.core.decision_gate import DecisionGate
+    from src.core.fact_hypergraph import ClinicalFact, FactIndex
+    from src.core.statistical_filter import StatisticalFilter
+    from src.evaluation.dev_pool_retrieval import GO_DELTA_NDCG, GO_DELTA_RECALL
+    from src.evaluation.run_base_paper_benchmark import _format_retrieved_evidence, _hcad_config_id
+
+    # 1) _format_retrieved_evidence keeps packing short trailing items after a clip
+    long_doc = (" ".join(["word"] * 299) + ". " + " ".join(["extra"] * 60))
+    short_doc = "Metformin is contraindicated in severe renal impairment."
+    ev = _format_retrieved_evidence([{"document": long_doc}, {"document": short_doc}], tag="Doc")
+    assert "[Doc 1]" in ev and "[Doc 2]" in ev
+
+    # 2) _hcad_config_id responds to HCAD_TENSOR_MODE and HCAD_TAU_SAT
+    monkeypatch.setenv("HCAD_TENSOR_MODE", "static")
+    cid_static = _hcad_config_id()
+    monkeypatch.setenv("HCAD_TENSOR_MODE", "learned")
+    assert _hcad_config_id() != cid_static
+
+    # 3) AnisotropicTransformer._compute_confidence handles PrimeKG weight=None on in_edges
+    g = nx.MultiDiGraph()
+    g.add_node(1, name="Metformin")
+    g.add_node(2, name="Renal failure")
+    g.add_edge(2, 1, relation="contraindication")  # no weight/confidence key
+    g.name_to_node = {"Metformin": 1, "Renal failure": 2}
+    kg = SimpleNamespace(graph=g, name_to_node=g.name_to_node)
+    assert AnisotropicTransformer()._compute_confidence(kg, "Metformin") == 1.0
+
+    # 4) DecisionGate does not implicitly activate OpenRouter without explicit opt-in
+    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+    monkeypatch.delenv("TYPESAFE_USE_OPENROUTER", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    assert DecisionGate().mode == "local-calibrated"
+
+    # 5) FactIndex preserves mixed-case insertions under canonical lowercase lookup
+    idx = FactIndex()
+    idx.add(ClinicalFact(predicate="treats", roles={"anchor": "Metformin"}, members={"Metformin"}))
+    idx.add(ClinicalFact(predicate="avoids", roles={"anchor": "METFORMIN"}, members={"METFORMIN"}))
+    assert len(idx.retrieve({"metformin"})) == 2
+
+    # 6) StatisticalFilter tolerates tensor-like .detach().cpu().numpy() objects
+    class FakeTensor:
+        def detach(self):
+            return self
+        def cpu(self):
+            return self
+        def numpy(self):
+            return np.array([0.8, 0.9, 0.2], dtype=np.float32)
+
+    th, _, _ = StatisticalFilter().compute_threshold(FakeTensor())
+    assert th > 0.0
+    assert (-0.5 >= GO_DELTA_RECALL and 0.0 >= GO_DELTA_NDCG) is False

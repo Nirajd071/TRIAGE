@@ -130,5 +130,29 @@ class TestHallucinationEvaluator(unittest.TestCase):
         self.assertEqual(result["hard"]["n_hallucinated"], 1)
         self.assertEqual(ollama.chat.call_args.kwargs["model"], "clf")
 
+    def test_closed_book_label_with_slash_sanitizes_filename(self):
+        from src.config import ARM_LABELS
+
+        evaluator = HallucinationEvaluator()
+        evaluator._data = [
+            {"Question": "Q1", "Knowledge": ["K"], "Ground Truth": "G",
+             "Hallucinated Answer": "H", "Difficulty Level": "easy"}
+        ]
+        ollama = types.ModuleType("ollama")
+        ollama.chat = MagicMock(return_value={"message": {"content": "FAITHFUL"}})
+        system = SimpleNamespace(retrieve_and_generate=lambda q: "answer")
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            sys.modules, {"ollama": ollama}
+        ), patch(
+            "src.evaluation.hallucination_evaluator.TABLES_DIR", Path(temp_dir)
+        ), patch(
+            "src.evaluation.hallucination_evaluator.HALLU_DIR", Path(temp_dir) / "h"
+        ), patch("src.wandb_tracking.WANDB_MODE", "disabled"):
+            result = evaluator.evaluate(
+                system, num_samples=None, system_name=ARM_LABELS["closed_book"], classifier_model="clf"
+            )
+            self.assertTrue(Path(result["output_path"]).exists())
+            self.assertNotIn("/_", result["output_path"])
+
 if __name__ == "__main__":
     unittest.main()

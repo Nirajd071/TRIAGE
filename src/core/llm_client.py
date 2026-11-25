@@ -110,7 +110,8 @@ class UnifiedLLMClient:
         if self.provider == "gemini":
             from src.config import GEMINI_API_KEY
             self.gemini_key = os.getenv("GEMINI_API_KEY") or GEMINI_API_KEY
-            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else os.getenv("GEMINI_JUDGE_MODEL", "gemini-flash-lite-latest")
+            ignored = (JUDGE_HF_MODEL, "judge", LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
+            self.model = model if (model and model not in ignored) else os.getenv("GEMINI_JUDGE_MODEL", "gemini-flash-lite-latest")
             if not self.gemini_key:
                 if strict:
                     raise RuntimeError(f"GEMINI_API_KEY is not set but strict client requested gemini:{self.model}")
@@ -123,7 +124,8 @@ class UnifiedLLMClient:
         if self.provider == "groq":
             from src.config import GROQ_API_KEY
             self.groq_key = os.getenv("GROQ_API_KEY") or GROQ_API_KEY
-            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else os.getenv("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b")
+            ignored = (JUDGE_HF_MODEL, "judge", LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
+            self.model = model if (model and model not in ignored) else os.getenv("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b")
             if not self.groq_key:
                 if strict:
                     raise RuntimeError(f"GROQ_API_KEY is not set but strict client requested groq:{self.model}")
@@ -136,7 +138,8 @@ class UnifiedLLMClient:
         if self.provider == "openrouter":
             from src.config import OPENROUTER_API_KEY
             self.openrouter_key = os.getenv("OPENROUTER_API_KEY") or OPENROUTER_API_KEY
-            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else "nvidia/nemotron-3.5-lightning:free"
+            ignored = (JUDGE_HF_MODEL, "judge", LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
+            self.model = model if (model and model not in ignored) else "openai/gpt-oss-120b:free"
             if not self.openrouter_key:
                 if strict:
                     raise RuntimeError(f"OPENROUTER_API_KEY is not set but strict client requested openrouter:{self.model}")
@@ -147,7 +150,7 @@ class UnifiedLLMClient:
                 return
 
         if self.provider == "huggingface" and self.token:
-            self.model = LLM_HF_MODEL if (not model or model == LLM_MODEL) else model
+            self.model = LLM_HF_MODEL if (not model or model in (LLM_MODEL, *LLM_MODEL_ALIASES)) else model
             try:
                 from huggingface_hub import InferenceClient
                 self._hf_client = InferenceClient(api_key=self.token, timeout=90.0)
@@ -156,11 +159,14 @@ class UnifiedLLMClient:
                 if strict:
                     raise RuntimeError(f"HF client unavailable for strict client: {e}") from e
                 logger.warning("Failed to initialize HF client: %s. Using Ollama.", e)
-        else:
-            if strict and self.provider == "huggingface":
+        elif self.provider == "huggingface":
+            if strict:
                 raise RuntimeError("HF_TOKEN is not set but strict client requested huggingface")
-            if self.provider != "nvidia":
-                logger.info("HF provider unavailable (no token) - using Ollama.")
+            logger.info("HF provider unavailable (no token) - using Ollama.")
+        elif self.provider != "ollama":
+            if strict:
+                raise RuntimeError(f"Unknown LLM provider {self.provider!r} for strict client")
+            logger.warning("Unknown LLM provider %r; falling back to Ollama.", self.provider)
         self.provider = "ollama"
         self.model = self.ollama_model
 
@@ -228,6 +234,9 @@ class UnifiedLLMClient:
     def _chat_ollama(self, messages, temp, tokens, json_mode, model):
         import ollama
         kwargs = {"options": self._ollama_options(temp, tokens)}
+        keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "").strip()
+        if keep_alive:
+            kwargs["keep_alive"] = int(keep_alive) if keep_alive.lstrip("-").isdigit() else keep_alive
         if json_mode:
             kwargs["format"] = "json"
         if is_thinking_model(model):
@@ -240,10 +249,13 @@ class UnifiedLLMClient:
             res = _chat(model=model, messages=messages, **kwargs)
         except TypeError:
             kwargs.pop("think", None)
+            kwargs.pop("keep_alive", None)
             res = _chat(model=model, messages=messages, **kwargs)
         raw = res if isinstance(res, dict) else getattr(res, "__dict__", {})
         self.last_usage = _ollama_usage(raw)
-        return res.message.content or ""
+        if isinstance(res, dict):
+            return (res.get("message") or {}).get("content") or ""
+        return getattr(getattr(res, "message", None), "content", None) or ""
 
     def _chat_ollama_http(self, messages, temp, tokens, json_mode, model):
         """Timeout-guarded HTTP call (the ollama pkg has no timeout kwarg)."""
@@ -307,6 +319,14 @@ class UnifiedLLMClient:
                     f"`ollama pull {self.model}` (installed: "
                     f"{', '.join(sorted(n for n in installed if n)) or 'none'})."
                 )
+            if self.model not in installed and f"{self.model}:latest" not in installed:
+                for alias in LLM_MODEL_ALIASES:
+                    for tag in (alias, f"{alias}:latest"):
+                        if tag in installed:
+                            self.model = tag
+                            break
+                    if self.model in installed:
+                        break
         try:
             reply = self.chat(
                 [{"role": "user", "content": 'Reply with exactly this JSON: {"ok": true}'}],
@@ -359,15 +379,19 @@ class UnifiedLLMClient:
                 "Content-Type": "application/json",
             }
             contents = []
-            system_instruction = None
+            system_parts = []
             for m in messages:
                 role = m.get("role", "user")
                 text = m.get("content", "")
                 if role == "system":
-                    system_instruction = {"parts": [{"text": text}]}
+                    if text:
+                        system_parts.append(text)
                 else:
                     g_role = "user" if role == "user" else "model"
                     contents.append({"role": g_role, "parts": [{"text": text}]})
+            system_instruction = (
+                {"parts": [{"text": "\n\n".join(system_parts)}]} if system_parts else None
+            )
             if not contents and system_instruction:
                 contents = [{"role": "user", "parts": system_instruction["parts"]}]
                 system_instruction = None
@@ -387,6 +411,7 @@ class UnifiedLLMClient:
             for cur_model in candidate_models:
                 gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{cur_model}:generateContent"
                 for attempt in range(5):
+                    resp = None
                     try:
                         resp = requests.post(gemini_url, json=payload, headers=headers, timeout=60.0)
                         resp.raise_for_status()
@@ -404,9 +429,12 @@ class UnifiedLLMClient:
                         return ""
                     except Exception as e:
                         last_err = e
+                        status = getattr(resp, "status_code", None)
                         logger.warning("Gemini (%s) attempt %d failed: %s", cur_model, attempt + 1, e)
+                        if status in (400, 401, 402, 403, 404, 410, 422):
+                            break
                         if attempt < 4:
-                            time.sleep(min(16.0, 2.0 * (2 ** attempt)))
+                            time.sleep(_retry_wait_seconds(resp, attempt, base=2.0))
                 logger.warning("Gemini model %s exhausted retries; trying alternate candidate if available.", cur_model)
 
             if self.strict:

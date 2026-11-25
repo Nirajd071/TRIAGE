@@ -182,7 +182,12 @@ def build_vector_store(
     had_live = VECTORDB_DIR.exists() and any(VECTORDB_DIR.iterdir())
     if had_live:
         os.replace(VECTORDB_DIR, backup_dir)
-    os.replace(staging_dir, VECTORDB_DIR)
+    try:
+        os.replace(staging_dir, VECTORDB_DIR)
+    except Exception:
+        if had_live and backup_dir.exists() and not VECTORDB_DIR.exists():
+            os.replace(backup_dir, VECTORDB_DIR)
+        raise
     if had_live:
         shutil.rmtree(backup_dir, ignore_errors=True)
     final = chromadb.PersistentClient(path=str(VECTORDB_DIR)).get_collection(CHROMA_COLLECTION_NAME)
@@ -203,9 +208,9 @@ _SHARED_MODEL = None
 def _get_shared_model():
     global _SHARED_MODEL
     if _SHARED_MODEL is None:
-        import torch
         from sentence_transformers import SentenceTransformer
-        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        from src.config import resolve_embed_device
+        _device = resolve_embed_device()
         try:
             _SHARED_MODEL = SentenceTransformer(EMBEDDING_MODEL_NAME, device=_device, local_files_only=True)
         except Exception:
@@ -312,7 +317,7 @@ def ingest_clinical_chunks(
             except _json.JSONDecodeError:
                 continue
 
-            text = chunk.get("text", "").strip()
+            text = (chunk.get("text") or "").strip()
             if not text or len(text) < 20:
                 continue
 
@@ -353,7 +358,7 @@ def ingest_clinical_chunks(
     # Final batch
     if texts:
         embeddings = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
-        collection.add(
+        collection.upsert(
             documents=texts,
             embeddings=embeddings.tolist(),
             metadatas=metadatas,

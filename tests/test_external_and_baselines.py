@@ -178,3 +178,66 @@ def test_polarity_rel_prefix_and_reranker_arms(tmp_path):
     assert len(res["arms"]) == 5
     assert res["n_pairs"] == len(PAIRS)
     assert (tmp_path / "pol.json").exists()
+
+
+def test_graph_rag_resolves_integer_node_ids_and_neighbor_names():
+    from src.baselines.graph_rag import GraphRAGBaseline
+    from src.core.hypergraph_builder import HypergraphBuilder
+
+    g = nx.MultiDiGraph()
+    g.add_node(10, name="Metformin", node_type="drug")
+    g.add_node(20, name="Lactic acidosis", node_type="effect/phenotype")
+    g.add_edge(10, 20, relation="contraindication", weight=0.9)
+    g.name_to_node = {"Metformin": 10, "Lactic acidosis": 20}
+    hg = HypergraphBuilder(g)
+
+    ner = MagicMock()
+    ner.extract_entities.return_value = {"CHEMICAL": [{"text": "Metformin"}]}
+    linker = MagicMock()
+    linker.link_entities.return_value = {"CHEMICAL": [{"text": "Metformin", "canonical_name": "Metformin"}]}
+
+    rag = GraphRAGBaseline(
+        dense_retrieve_fn=lambda q, k: [{"text": "Dense overview.", "score": 0.5}],
+        encode_fn=lambda texts: np.tile(np.array([1.0, 0.0], dtype=np.float32), (len(texts), 1)),
+        ner=ner,
+        entity_linker=linker,
+        hypergraph=hg,
+        top_k=2,
+        dense_keep=1,
+    )
+    out = rag.retrieve("Metformin lactic acidosis risk")
+    kg_hits = [r for r in out if r.get("source") == "primekg_graphrag"]
+    assert kg_hits
+    assert "Metformin" in kg_hits[0]["text"] and "Lactic acidosis" in kg_hits[0]["text"]
+    assert "10" not in kg_hits[0]["text"]
+
+
+def test_mirage_benchmark_uses_env_overrides_cleanly(tmp_path):
+    from unittest.mock import patch
+    from src.evaluation.external_benchmarks import run_mirage_benchmark
+    from src.evaluation.run_base_paper_benchmark import BenchmarkArm
+
+    samples = [
+        {"id": "medqa_0", "dataset": "MedQA", "question": "Q?", "retrieval_query": "Q?", "gold_letter": "A"},
+    ]
+    arm = BenchmarkArm(
+        arm_id="hcad",
+        label="HCAD-RAG",
+        retrieve=lambda q: [{"document": "Answer is A.", "score": 0.9}],
+        build_messages=lambda q, ctx: [{"role": "user", "content": q}],
+        env={"HCAD_TEST_FLAG": "1"},
+    )
+    fake_llm = MagicMock()
+    fake_llm.chat.return_value = "Final Answer: A"
+
+    with patch("src.evaluation.external_benchmarks._load_mirage_samples", return_value=samples), \
+         patch("src.evaluation.run_base_paper_benchmark.build_arms", return_value={"hcad": arm}):
+        res = run_mirage_benchmark(
+            n_per_dataset=1,
+            arms=("hcad",),
+            llm_client=fake_llm,
+            output_path=tmp_path / "mirage.json",
+            checkpoint_path=tmp_path / "mirage_ckpt.jsonl",
+        )
+    assert res["arms"]["hcad"]["overall_accuracy"]["mean"] == 1.0
+    assert (tmp_path / "mirage.json").exists()

@@ -81,9 +81,13 @@ def test_ollama_cell_uses_registry_quantized_tags_and_memory_guards():
 def test_notebook_covers_revision_stages():
     src = _sources()
     # benchmark checks the statistics and latency outputs on N_SAMPLES questions
+    _ran_ok = any(key in src[17] for key in ("EXPECTED_JUDGES",))
+    assert _ran_ok
     for key in ("statistical_tests", "inter_judge_agreement", "latency_breakdown.json",
                 "str(N_SAMPLES)", "EXPECTED_JUDGES"):
         assert key in src[17]
+    assert "--no-deps" in src[4]
+    assert "'WANDB_MODE'" in src[6] and "'TYPESAFE_API_KEY'" in src[6]
     assert "'50'" not in src[17] and "'50'" not in src[18]
     assert "evidence_diagnostics" in src[19]
     assert "'polarity'" in src[20] and "fresh results" in src[20]

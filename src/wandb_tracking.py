@@ -10,9 +10,21 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Generator
 
-from src.config import WANDB_ENTITY, WANDB_MODE, WANDB_PROJECT
+import src.config as _cfg
+
+WANDB_MODE = _cfg.WANDB_MODE
+_INITIAL_WANDB_MODE = WANDB_MODE
 
 logger = logging.getLogger(__name__)
+
+
+def _wandb_mode() -> str:
+    env_mode = os.environ.get("WANDB_MODE")
+    if env_mode:
+        return env_mode.strip().lower()
+    if WANDB_MODE != _INITIAL_WANDB_MODE:
+        return str(WANDB_MODE).strip().lower()
+    return str(getattr(_cfg, "WANDB_MODE", "online")).strip().lower()
 
 def flatten_numeric_metrics(
     values: dict[str, Any], prefix: str = ""
@@ -35,14 +47,14 @@ def wandb_run(
     config: dict[str, Any] | None = None,
 ) -> Generator[Any | None, None, None]:
     """Open a W&B run when credentials are configured; otherwise run locally."""
-    if WANDB_MODE.strip().lower() == "disabled":
+    mode = _wandb_mode()
+    if mode == "disabled":
         logger.info("W&B logging disabled by WANDB_MODE.")
         yield None
         return
 
     # offline mode never needs an API key - previously
     # WANDB_MODE=offline without a key was silently skipped entirely.
-    mode = WANDB_MODE.strip().lower()
     if mode == "offline":
         os.environ.setdefault("WANDB_MODE", "offline")
     elif not os.getenv("WANDB_API_KEY"):
@@ -53,11 +65,11 @@ def wandb_run(
     import wandb
 
     run = wandb.init(
-        project=WANDB_PROJECT,
-        entity=WANDB_ENTITY,
+        project=_cfg.WANDB_PROJECT,
+        entity=_cfg.WANDB_ENTITY,
         name=name,
         job_type=job_type,
-        mode=WANDB_MODE,
+        mode=mode,
         config=config or {},
     )
     if run is None:
@@ -92,7 +104,7 @@ def tracked_run(
 
 def log_active_metrics(metrics: dict[str, Any], step: int | None = None) -> None:
     """Log intermediate metrics to the current W&B run, if one is active."""
-    if not os.getenv("WANDB_API_KEY") or WANDB_MODE.strip().lower() == "disabled":
+    if not os.getenv("WANDB_API_KEY") or _wandb_mode() == "disabled":
         return
 
     import wandb
@@ -108,7 +120,7 @@ def upload_checkpoint_artifact(files: list[Path], name: str = "benchmark-checkpo
     only recovery path for a killed session. Safe no-op when W&B is
     disabled/offline/unauthenticated or no run is active.
     """
-    if WANDB_MODE.strip().lower() in ("disabled", "offline"):
+    if _wandb_mode() in ("disabled", "offline"):
         return False
     if not os.getenv("WANDB_API_KEY"):
         return False

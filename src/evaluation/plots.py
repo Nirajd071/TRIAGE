@@ -39,8 +39,8 @@ from src.config import (  # noqa: E402
 DIMS = ["comprehensiveness", "diversity", "empowerment", "logical", "readability", "overall_score"]
 
 #: Canonical display order of arms (labels).
-SYSTEM_ORDER = [ARM_LABELS[a] for a in ("closed_book", "bm25", "dense", "hybrid", "hcad",
-                                        "hcad_no_decoupling", "hcad_no_gs", "hcad_no_gate")]
+SYSTEM_ORDER = [ARM_LABELS[a] for a in ("closed_book", "bm25", "dense", "hybrid", "reranker", "graphrag", "hcad",
+                                        "hcad_no_decoupling", "hcad_no_gs", "hcad_no_aniso", "hcad_no_gate")]
 CORE_SYSTEMS = [ARM_LABELS["closed_book"], ARM_LABELS["dense"], ARM_LABELS["hcad"]]
 SHORT = {ARM_LABELS[a]: ARM_SHORT_LABELS[a] for a in ARM_LABELS}
 
@@ -50,9 +50,12 @@ SYSTEM_STYLE = {
     ARM_LABELS["bm25"]: {"color": "#E69F00", "marker": "v", "linestyle": ":"},
     ARM_LABELS["dense"]: {"color": "#0072B2", "marker": "s", "linestyle": "-."},
     ARM_LABELS["hybrid"]: {"color": "#56B4E9", "marker": "D", "linestyle": ":"},
+    ARM_LABELS["reranker"]: {"color": "#332288", "marker": "p", "linestyle": "-."},
+    ARM_LABELS["graphrag"]: {"color": "#117733", "marker": "h", "linestyle": "--"},
     ARM_LABELS["hcad"]: {"color": "#009E73", "marker": "^", "linestyle": "-"},
     ARM_LABELS["hcad_no_decoupling"]: {"color": "#CC79A7", "marker": "P", "linestyle": "-"},
     ARM_LABELS["hcad_no_gs"]: {"color": "#D55E00", "marker": "X", "linestyle": "-"},
+    ARM_LABELS["hcad_no_aniso"]: {"color": "#882255", "marker": "d", "linestyle": "--"},
     ARM_LABELS["hcad_no_gate"]: {"color": "#F0E442", "marker": "*", "linestyle": "-"},
 }
 OUTCOME_COLORS = {"win": "#009E73", "tie": "#BBBBBB", "loss": "#D55E00"}
@@ -380,7 +383,8 @@ def plot_hallucination_tiers(hallu_path: Path | None = None,
     ax.set_ylim(0, 1)
     ax.set_ylabel(ylabel)
     ax.set_title(f"MedHallu ({mode}) - {data.get('system', 'system')}")
-    return _save(fig, f"hallucination_tiers_{data.get('system', 'system').replace(' ', '_').lower()}.png",
+    from src.config import safe_artifact_slug
+    return _save(fig, f"hallucination_tiers_{safe_artifact_slug(str(data.get('system', 'system')))}.png",
                  figures_dir)
 
 

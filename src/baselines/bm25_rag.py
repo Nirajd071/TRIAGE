@@ -115,18 +115,21 @@ class BM25RAG:
             except Exception as e:
                 logger.warning("Failed to load BM25 index from %s (%s). Rebuilding...", self.index_path, e)
 
-        # Build index from vector store collection or fallback corpus
-        self._build_index_from_store()
-
         # Try direct sqlite3 extraction for fast ingestion without SQL variable limits
-        sqlite_db = Path("data/vectordb/chroma.sqlite3")
+        from src.config import VECTORDB_DIR
+        sqlite_db = VECTORDB_DIR / "chroma.sqlite3"
         if sqlite_db.exists():
             try:
                 import sqlite3
-                conn = sqlite3.connect(sqlite_db)
-                cur = conn.cursor()
-                cur.execute("SELECT id, string_value FROM embedding_metadata WHERE key = 'chroma:document'")
-                rows = cur.fetchall()
+                with sqlite3.connect(sqlite_db) as conn:
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT COALESCE(e.embedding_id, CAST(em.id AS TEXT)), em.string_value "
+                        "FROM embedding_metadata em "
+                        "LEFT JOIN embeddings e ON e.id = em.id "
+                        "WHERE em.key = 'chroma:document'"
+                    )
+                    rows = cur.fetchall()
                 if rows:
                     logger.info("Ingesting %d docs from Chroma SQLite store for BM25...", len(rows))
                     corpus_docs = []
@@ -152,6 +155,7 @@ class BM25RAG:
                 logger.warning("Direct SQLite read failed: %s. Falling back to ChromaDB API...", e)
 
         try:
+            from src.data.build_vector_store import load_vector_store
             collection = load_vector_store()
             total = collection.count()
             if total == 0:
@@ -264,7 +268,7 @@ class BM25RAG:
         user_content = (
             f"Clinical Query:\n{query}\n\n"
             f"Retrieved Evidence:\n{formatted_evidence}\n\n"
-            f"{synthesis_instructions(formatted_evidence)}"
+            f"{synthesis_instructions('Doc')}"
         )
         return [
             {"role": "system", "content": LLM_SYSTEM_PROMPT},

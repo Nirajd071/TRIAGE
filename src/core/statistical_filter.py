@@ -9,6 +9,13 @@ from src.config import FILTERING_K, MAX_EVIDENCE_ITEMS, MIN_PHI_SCORE, tau_sat a
 
 logger = logging.getLogger(__name__)
 
+def _to_1d_float_array(scores) -> np.ndarray:
+    """Convert numpy/tensor scores safely to a 1D float64 array."""
+    if hasattr(scores, "detach"):
+        scores = scores.detach().cpu().numpy()
+    return np.asarray(scores, dtype=np.float64).ravel()
+
+
 class StatisticalFilter:
     """Adaptive statistical Heaviside filter for context selection."""
 
@@ -16,7 +23,7 @@ class StatisticalFilter:
         self.k = k
 
     def compute_threshold(
-        self, scores: np.ndarray | torch.Tensor, k: Optional[float] = None,
+        self, scores: "np.ndarray | torch.Tensor", k: Optional[float] = None,
         tau_sat: Optional[float] = None,
     ) -> tuple[float, float, float]:
         """Compute adaptive threshold from similarity score distribution.
@@ -35,7 +42,7 @@ class StatisticalFilter:
         k = k if k is not None else self.k
         if tau_sat is None:
             tau_sat = _tau_sat()
-        arr = np.asarray(scores, dtype=np.float64).ravel()
+        arr = _to_1d_float_array(scores)
         if arr.size == 0:
             return 0.0, 0.0, 0.0
         if not np.isfinite(arr).all():
@@ -48,18 +55,18 @@ class StatisticalFilter:
         return threshold, mu, sigma
 
     def heaviside_filter(
-        self, scores: np.ndarray | torch.Tensor, k: Optional[float] = None,
+        self, scores: "np.ndarray | torch.Tensor", k: Optional[float] = None,
         tau_sat: Optional[float] = None,
     ) -> np.ndarray:
         """Apply Heaviside step function: 1 if score >= threshold else 0."""
         threshold, _, _ = self.compute_threshold(scores, k=k, tau_sat=tau_sat)
-        arr = np.asarray(scores, dtype=np.float64)
+        arr = _to_1d_float_array(scores)
         return (arr >= threshold).astype(int)
 
     def filter_contexts(
         self,
         contexts: list[dict],
-        scores: np.ndarray,
+        scores: "np.ndarray | torch.Tensor",
         k: Optional[float] = None,
         score_key: str = "phi_final",
         max_top_k: int = MAX_EVIDENCE_ITEMS,  # align with config K<=8
@@ -73,7 +80,7 @@ class StatisticalFilter:
         if not contexts:
             return []
 
-        scores = np.asarray(scores, dtype=float)
+        scores = _to_1d_float_array(scores)
         if len(contexts) != len(scores):
             raise ValueError(f"Mismatch: {len(contexts)} contexts vs {len(scores)} scores")
 

@@ -165,6 +165,8 @@ class HCADPipelineSaver:
                 manifest = json.load(f)
             for rel_name, expected_md5 in manifest.get("files", {}).items():
                 target = bundle_path / rel_name
+                if not target.exists() and rel_name == "primekg_graph.gpickle":
+                    target = PROCESSED_DATA_DIR / rel_name
                 if not target.exists():
                     raise ValueError(f"Manifest references missing file: {rel_name}")
                 if HCADPipelineSaver._compute_md5(target) != expected_md5:
@@ -196,9 +198,10 @@ class HCADPipelineSaver:
         # Pre-warm pipeline components
         retriever._ensure_components()
         if getattr(retriever, "_bundle_aniso", None) and retriever._transformer is not None:
-            retriever._transformer.alpha = retriever._bundle_aniso["alpha"]
-            retriever._transformer.beta = retriever._bundle_aniso["beta"]
-            retriever._transformer.gamma = retriever._bundle_aniso["gamma"]
+            for attr in ("alpha", "beta", "gamma"):
+                val = retriever._bundle_aniso.get(attr)
+                if val is not None:
+                    setattr(retriever._transformer, attr, val)
         logger.info("HCAD-RAG Pipeline loaded successfully and ready for inference.")
 
         return retriever

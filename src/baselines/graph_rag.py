@@ -69,14 +69,24 @@ class GraphRAGBaseline:
         seed_names = self._linked_entity_names(query)
         kg_candidates: List[Dict[str, Any]] = []
         if seed_names and self.hypergraph is not None:
+            g = self.hypergraph.graph
             expanded: List[str] = list(seed_names)
             for name in seed_names[:3]:
                 for nb in list(self.hypergraph.expand_neighborhood(name, hops=1))[:8]:
-                    if str(nb) not in expanded:
-                        expanded.append(str(nb))
-            triples = self.hypergraph.get_triples_for_entities(expanded)[: self.max_kg_pool]
+                    nb_name = str(g.nodes[nb].get("name", nb)) if nb in g else str(nb)
+                    if nb_name not in expanded:
+                        expanded.append(nb_name)
+            raw_triples = self.hypergraph.get_triples_for_entities(expanded)[: self.max_kg_pool]
+            triples = [
+                (
+                    str(g.nodes[u].get("name", u)) if u in g else str(u),
+                    str(rel),
+                    str(g.nodes[v].get("name", v)) if v in g else str(v),
+                )
+                for u, rel, v in raw_triples
+            ]
             if triples:
-                texts = [triple_to_sentence(str(u), str(rel), str(v)) for u, rel, v in triples]
+                texts = [triple_to_sentence(u, rel, v) for u, rel, v in triples]
                 embs = np.asarray(self.encode_fn([query] + texts), dtype=np.float32)
                 norms = np.linalg.norm(embs, axis=1, keepdims=True) + 1e-12
                 embs = embs / norms

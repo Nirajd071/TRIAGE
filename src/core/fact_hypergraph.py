@@ -53,10 +53,11 @@ class FactIndex:
         idx = len(self.facts)
         self.facts.append(fact)
         for e in set(fact.roles.values()) | set(fact.members):
-            self.by_entity[e].append(idx)
             low = str(e).lower()
-            if low not in self.by_entity:
-                self.by_entity[low] = self.by_entity[e]
+            bucket = self.by_entity[low]
+            bucket.append(idx)
+            if e != low:
+                self.by_entity[e] = bucket
 
     def retrieve(self, anchors: set[str], predicate: str | None = None, top_k: int = 20):
         """Score facts by role coverage x confidence (no co-membership fabrication)."""

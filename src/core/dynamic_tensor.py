@@ -103,12 +103,14 @@ class LoadedChannelAdapter:
 
 def save_channel_adapter(adapter: ChannelWeightAdapter, path=None) -> str:
     """Persist the trained channel-weight adapter with a kind tag."""
-    from src.config import TENSOR_MODEL_PATH
-    path = path or TENSOR_MODEL_PATH
+    from pathlib import Path
+    from src.config import EMBEDDING_DIMENSION, TENSOR_MODEL_PATH
+    path = Path(path) if path is not None else TENSOR_MODEL_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "kind": "channel_adapter",
         "feat_dim": adapter.feat_dim,
+        "embed_dim": EMBEDDING_DIMENSION,
         "state": adapter.state_dict(),
     }, path)
     return str(path)
@@ -116,8 +118,9 @@ def save_channel_adapter(adapter: ChannelWeightAdapter, path=None) -> str:
 
 def load_channel_adapter(path=None) -> LoadedChannelAdapter:
     """Load a channel-adapter checkpoint; raises if it is another kind."""
-    from src.config import TENSOR_MODEL_PATH
-    path = path or TENSOR_MODEL_PATH
+    from pathlib import Path
+    from src.config import EMBEDDING_DIMENSION, TENSOR_MODEL_PATH
+    path = Path(path) if path is not None else TENSOR_MODEL_PATH
     if not path.exists():
         raise FileNotFoundError(f"No trained tensor at {path}")
     ckpt = torch.load(path, map_location="cpu")
@@ -126,14 +129,14 @@ def load_channel_adapter(path=None) -> LoadedChannelAdapter:
     adapter = ChannelWeightAdapter(feat_dim=int(ckpt.get("feat_dim", 25)))
     adapter.load_state_dict(ckpt["state"])
     adapter.eval()
-    return LoadedChannelAdapter(adapter)
+    return LoadedChannelAdapter(adapter, embed_dim=int(ckpt.get("embed_dim", EMBEDDING_DIMENSION)))
 
 
 def save_tensor(model: "QueryAdaptiveAnisotropicTensor", path=None) -> str:
     """Persist the trained hypernetwork (only trainable weights)."""
-    import torch
+    from pathlib import Path
     from src.config import TENSOR_MODEL_PATH
-    path = path or TENSOR_MODEL_PATH
+    path = Path(path) if path is not None else TENSOR_MODEL_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), path)
     return str(path)
@@ -146,9 +149,9 @@ def load_tensor(path=None):
     legacy raw state_dicts, or the isotropic-lambda channel adapter for
     kind-tagged checkpoints. The retriever consumes both identically.
     """
-    import torch
-    from src.config import TENSOR_MODEL_PATH
-    path = path or TENSOR_MODEL_PATH
+    from pathlib import Path
+    from src.config import EMBEDDING_DIMENSION, TENSOR_MODEL_PATH
+    path = Path(path) if path is not None else TENSOR_MODEL_PATH
     if not path.exists():
         raise FileNotFoundError(f"No trained tensor at {path}")
     ckpt = torch.load(path, map_location="cpu")
@@ -156,7 +159,7 @@ def load_tensor(path=None):
         adapter = ChannelWeightAdapter(feat_dim=int(ckpt.get("feat_dim", 25)))
         adapter.load_state_dict(ckpt["state"])
         adapter.eval()
-        return LoadedChannelAdapter(adapter)
+        return LoadedChannelAdapter(adapter, embed_dim=int(ckpt.get("embed_dim", EMBEDDING_DIMENSION)))
     model = QueryAdaptiveAnisotropicTensor()
     model.load_state_dict(ckpt)
     model.eval()

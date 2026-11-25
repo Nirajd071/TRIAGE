@@ -281,3 +281,21 @@ def test_triage_query_error_sanitization():
     assert res.json()["detail"] == "Internal pipeline processing error"
     assert "password123" not in res.text
 
+
+def test_subgraph_unwraps_knowledge_graph_wrapper():
+    import networkx as nx
+    from types import SimpleNamespace
+
+    nx_g = nx.MultiDiGraph()
+    nx_g.add_node(1, name="Metformin", node_type="drug")
+    nx_g.add_node(2, name="Diabetes", node_type="disease")
+    nx_g.add_edge(1, 2, relation="indication")
+
+    server.provider = server.PipelineProvider()
+    server.provider._hcad = SimpleNamespace(graph=SimpleNamespace(graph=nx_g))
+    client = TestClient(server.app)
+    res = client.get("/api/triage/subgraph", params={"query": "Metformin treats diabetes"})
+    assert res.status_code == 200
+    data = res.json()
+    assert len(data["nodes"]) == 2 and len(data["edges"]) == 1
+

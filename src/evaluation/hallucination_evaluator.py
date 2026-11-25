@@ -188,7 +188,8 @@ class HallucinationEvaluator:
             level: {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "n_invalid": 0}
             for level in self.DIFFICULTY_LEVELS + ["all"]
         }
-        safe_name = system_name.replace(" ", "_").lower()
+        from src.config import safe_artifact_slug
+        safe_name = safe_artifact_slug(system_name)
         HALLU_DIR.mkdir(parents=True, exist_ok=True)
         ckpt_path = HALLU_DIR / f"medhallu_{safe_name}_{eval_mode}_checkpoint.jsonl"
         done: dict[int, dict] = {}
@@ -201,11 +202,11 @@ class HallucinationEvaluator:
                 if (row.get("seed") == seed and row.get("n_requested") == num_samples
                         and row.get("classifier_model") == model_name):
                     done[row["sample_index"]] = row
-        ckpt = open(ckpt_path, "a", encoding="utf-8")
 
         # Bounded calls: the module-level ollama.chat has NO timeout, so a
         # stalled server would hang the (paid) GPU session indefinitely.
         from src.config import LLM_OLLAMA_TIMEOUT_S
+        from src.judge_models import is_thinking_model
         _client_cls = getattr(ollama, "Client", None)
         _chat = (_client_cls(timeout=LLM_OLLAMA_TIMEOUT_S).chat
                  if _client_cls is not None else ollama.chat)
@@ -213,14 +214,17 @@ class HallucinationEvaluator:
         def classify(question: str, answer: str, knowledge: str, sample_index: int) -> bool:
             messages = builder.build_hallucination_prompt(question, answer, knowledge)
             last_exc = None
+            extra_kwargs = {"think": False} if is_thinking_model(model_name) else {}
             for attempt in range(3):  # transient errors must not kill a 200-sample run
                 try:
                     response = _chat(
                         model=model_name,
                         messages=messages,
                         options={"temperature": 0.0, "num_predict": 8},
+                        **extra_kwargs,
                     )
-                    prediction = response.message.content.strip().upper().rstrip(".!")
+                    content = response["message"]["content"] if isinstance(response, dict) else response.message.content
+                    prediction = (content or "").strip().upper().rstrip(".!")
                     break
                 except Exception as exc:
                     last_exc = exc
@@ -238,77 +242,77 @@ class HallucinationEvaluator:
                                "sample %d: %r (counted as invalid)", sample_index, prediction)
             return label
 
-        for sample_index, item in enumerate(data):
-            question = item.get("Question", item.get("question", ""))
-            knowledge_value = item.get("Knowledge", item.get("knowledge", ""))
-            if isinstance(knowledge_value, (list, tuple)):
-                knowledge = "\n".join(str(part) for part in knowledge_value if part)
-            else:
-                knowledge = str(knowledge_value or "")
-            gt_answer = item.get("Ground Truth", item.get("ground_truth", ""))
-            hallu_answer = item.get(
-                "Hallucinated Answer", item.get("hallucinated_answer", "")
-            )
-            difficulty = str(
-                item.get("Difficulty Level", item.get("difficulty_level", "medium"))
-                or "medium"
-            ).lower().strip()
-            if not question or not knowledge or not gt_answer or not hallu_answer:
-                raise ValueError(
-                    f"MedHallu sample {sample_index} is missing question, knowledge, "
-                    "ground-truth answer, or hallucinated answer"
-                )
-            if difficulty not in self.DIFFICULTY_LEVELS:
-                raise ValueError(
-                    f"MedHallu sample {sample_index} has unknown difficulty "
-                    f"{difficulty!r}"
-                )
-
-            if sample_index in done:
-                row = done[sample_index]
-            elif eval_mode == "system_answers":
-                # Measure the RAG pipeline: generate, then classify.
-                try:
-                    generated = system.retrieve_and_generate(question)
-                except Exception as exc:
-                    logger.warning("System generation failed for MedHallu sample %d: %s",
-                                   sample_index, exc)
-                    generated = ""
-                if not isinstance(generated, str) or not generated.strip() \
-                        or generated.strip().startswith("[Error"):
-                    predictions = [None]
+        with open(ckpt_path, "a", encoding="utf-8") as ckpt:
+            for sample_index, item in enumerate(data):
+                question = item.get("Question", item.get("question", ""))
+                knowledge_value = item.get("Knowledge", item.get("knowledge", ""))
+                if isinstance(knowledge_value, (list, tuple)):
+                    knowledge = "\n".join(str(part) for part in knowledge_value if part)
                 else:
-                    predictions = [classify(question, generated, knowledge, sample_index)]
-                row = {"sample_index": sample_index, "difficulty": difficulty,
-                       "predictions": predictions, "actual": [None]}
-            else:
-                predictions = [classify(question, str(gt_answer), knowledge, sample_index),
-                               classify(question, str(hallu_answer), knowledge, sample_index)]
-                row = {"sample_index": sample_index, "difficulty": difficulty,
-                       "predictions": predictions, "actual": [False, True]}
-            if sample_index not in done:
-                ckpt.write(json.dumps({**row, "seed": seed, "n_requested": num_samples,
-                                       "classifier_model": model_name}) + "\n")
-                ckpt.flush()
+                    knowledge = str(knowledge_value or "")
+                gt_answer = item.get("Ground Truth", item.get("ground_truth", ""))
+                hallu_answer = item.get(
+                    "Hallucinated Answer", item.get("hallucinated_answer", "")
+                )
+                difficulty = str(
+                    item.get("Difficulty Level", item.get("difficulty_level", "medium"))
+                    or "medium"
+                ).lower().strip()
+                if not question or not knowledge or not gt_answer or not hallu_answer:
+                    raise ValueError(
+                        f"MedHallu sample {sample_index} is missing question, knowledge, "
+                        "ground-truth answer, or hallucinated answer"
+                    )
+                if difficulty not in self.DIFFICULTY_LEVELS:
+                    raise ValueError(
+                        f"MedHallu sample {sample_index} has unknown difficulty "
+                        f"{difficulty!r}"
+                    )
 
-            for predicted_hallu, actual_hallu in zip(row["predictions"], row["actual"]):
-                for level_key in ("all", difficulty):
-                    counts = results_by_difficulty[level_key]
-                    if predicted_hallu is None:
-                        counts["n_invalid"] += 1
-                    elif actual_hallu is None:
-                        # system_answers: no gold label; tp = labelled hallucinated
-                        counts["tp" if predicted_hallu else "tn"] += 1
+                if sample_index in done:
+                    row = done[sample_index]
+                elif eval_mode == "system_answers":
+                    # Measure the RAG pipeline: generate, then classify.
+                    try:
+                        generated = system.retrieve_and_generate(question)
+                    except Exception as exc:
+                        logger.warning("System generation failed for MedHallu sample %d: %s",
+                                       sample_index, exc)
+                        generated = ""
+                    if not isinstance(generated, str) or not generated.strip() \
+                            or generated.strip().startswith("[Error"):
+                        predictions = [None]
                     else:
-                        if actual_hallu and predicted_hallu:
-                            counts["tp"] += 1
-                        elif not actual_hallu and predicted_hallu:
-                            counts["fp"] += 1
-                        elif not actual_hallu and not predicted_hallu:
-                            counts["tn"] += 1
+                        predictions = [classify(question, generated, knowledge, sample_index)]
+                    row = {"sample_index": sample_index, "difficulty": difficulty,
+                           "predictions": predictions, "actual": [None]}
+                else:
+                    predictions = [classify(question, str(gt_answer), knowledge, sample_index),
+                                   classify(question, str(hallu_answer), knowledge, sample_index)]
+                    row = {"sample_index": sample_index, "difficulty": difficulty,
+                           "predictions": predictions, "actual": [False, True]}
+                if sample_index not in done:
+                    ckpt.write(json.dumps({**row, "seed": seed, "n_requested": num_samples,
+                                           "classifier_model": model_name}) + "\n")
+                    ckpt.flush()
+
+                for predicted_hallu, actual_hallu in zip(row["predictions"], row["actual"]):
+                    for level_key in ("all", difficulty):
+                        counts = results_by_difficulty[level_key]
+                        if predicted_hallu is None:
+                            counts["n_invalid"] += 1
+                        elif actual_hallu is None:
+                            # system_answers: no gold label; tp = labelled hallucinated
+                            counts["tp" if predicted_hallu else "tn"] += 1
                         else:
-                            counts["fn"] += 1
-        ckpt.close()
+                            if actual_hallu and predicted_hallu:
+                                counts["tp"] += 1
+                            elif not actual_hallu and predicted_hallu:
+                                counts["fp"] += 1
+                            elif not actual_hallu and not predicted_hallu:
+                                counts["tn"] += 1
+                            else:
+                                counts["fn"] += 1
 
         # Compute classification metrics for each difficulty.
         def _f1_from_counts(counts: dict) -> dict:
@@ -415,9 +419,12 @@ def main(argv=None) -> None:
     result = HallucinationEvaluator().evaluate(system, num_samples=args.n, seed=args.seed,
                                                system_name=name, mode=mode,
                                                classifier_model=args.classifier_model)
+    out_path = result.get("output_path")
+    if not out_path:
+        raise RuntimeError(result.get("error", "MedHallu evaluation failed without output"))
     from src.evaluation.plots import plot_hallucination_tiers
-    fig = plot_hallucination_tiers(Path(result["output_path"]), FIGURES_DIR)
-    print(f"saved {result['output_path']}" + (f" and {fig}" if fig else ""))
+    fig = plot_hallucination_tiers(Path(out_path), FIGURES_DIR)
+    print(f"saved {out_path}" + (f" and {fig}" if fig else ""))
 
 
 if __name__ == "__main__":

@@ -253,7 +253,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--only",
-        choices=["primekg", "medhallu"],
+        choices=["primekg", "medhallu", "pmc"],
         default=None,
         help="Download only the specified dataset.",
     )

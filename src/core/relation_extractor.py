@@ -273,6 +273,8 @@ class RelationExtractor:
             Each dict: ``{head, head_type, relation, tail, tail_type,
             is_negated, modifier}``.
         """
+        if not text or not entities:
+            return []
         # Flatten entities into a single list with types
         flat_entities: list[dict[str, Any]] = []
         for etype, elist in entities.items():

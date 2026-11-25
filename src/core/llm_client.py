@@ -257,6 +257,13 @@ class UnifiedLLMClient:
             return (res.get("message") or {}).get("content") or ""
         return getattr(getattr(res, "message", None), "content", None) or ""
 
+    @staticmethod
+    def _ollama_base_url() -> str:
+        host = (os.getenv("OLLAMA_HOST") or "http://localhost:11434").strip().rstrip("/")
+        if not host.startswith(("http://", "https://")):
+            host = f"http://{host}"
+        return host
+
     def _chat_ollama_http(self, messages, temp, tokens, json_mode, model):
         """Timeout-guarded HTTP call (the ollama pkg has no timeout kwarg)."""
         payload = {
@@ -274,7 +281,7 @@ class UnifiedLLMClient:
             payload["think"] = False
         try:
             resp = requests.post(
-                "http://localhost:11434/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_S,
+                f"{self._ollama_base_url()}/api/chat", json=payload, timeout=OLLAMA_TIMEOUT_S,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -299,7 +306,7 @@ class UnifiedLLMClient:
         """
         if self.provider == "ollama":
             try:
-                resp = requests.get("http://localhost:11434/api/tags", timeout=10)
+                resp = requests.get(f"{self._ollama_base_url()}/api/tags", timeout=10)
                 resp.raise_for_status()
                 installed = {m.get("name") for m in resp.json().get("models", [])}
             except Exception as e:

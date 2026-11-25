@@ -100,10 +100,10 @@ def download_pmc(
     out_dir = RAW_DATA_DIR / "pmc"
     out_dir.mkdir(parents=True, exist_ok=True)
     existing = sorted(out_dir.glob("article_*.txt"))
-    if existing and not force:
+    if len(existing) >= num_articles and not force:
         logger.info("PMC: %d articles already present - skipping.", len(existing))
         return out_dir
-    start_idx = len(existing)
+    start_idx = 0 if force else len(existing)
 
     pmcids = _search_pmcs(query, num_articles)
     logger.info("PMC: fetching %d OA clinical articles...", len(pmcids))

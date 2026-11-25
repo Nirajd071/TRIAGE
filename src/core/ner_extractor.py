@@ -216,6 +216,8 @@ class BiomedicalNER:
             ``"Cell"``.  Each value is a list of entity dicts with keys
             ``text``, ``start``, ``end``, ``label``.
         """
+        if not text or not str(text).strip():
+            return _empty_entities()
         self._load_models()
 
         # Audit item 20: the fallback covers only what no loaded model covers.
@@ -341,6 +343,8 @@ class SimpleNER:
         Returns the same dict structure as :class:`BiomedicalNER`.
         """
         entities = _empty_entities()
+        if not text or not str(text).strip():
+            return entities
         all_spans: list[dict[str, Any]] = []
 
         for label, patterns in self._patterns.items():

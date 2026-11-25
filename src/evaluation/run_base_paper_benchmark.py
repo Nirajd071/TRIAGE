@@ -1497,6 +1497,9 @@ def run_benchmark(num_samples: int = 10, output_path: Optional[Path] = None,
                     "Checkpointed questions are kept and will resume."
                 )
 
+    if checkpoint_upload_every > 0 and evaluated_this_session > 0 and evaluated_this_session % checkpoint_upload_every != 0:
+        upload_checkpoint_artifact([checkpoint_path, question_cache_path])
+
     records = _records_from_checkpoint(
         checkpoint_path, {s["question"] for s in samples}, question_pool=question_pool,
         question_set_id=question_set_id, required_judges=judge_names,

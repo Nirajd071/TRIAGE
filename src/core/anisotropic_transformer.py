@@ -242,13 +242,22 @@ class AnisotropicTransformer:
     ) -> float:
         """IDF-style weighting: rarer entities get higher weights.
 
-        IDF = log(N / (1 + df))   where N = total entities, df = count
+        IDF = log(N / (1 + df)) where N is corpus/graph frequency total and
+        df is entity document count (or node edge-incidence count when
+        entity_counts is not supplied, preventing a constant IDF term).
         """
         try:
             graph_nx = getattr(graph, "graph", graph)
             if entity_counts is None:
-                N = max(graph_nx.number_of_nodes(), 1) if graph_nx is not None and hasattr(graph_nx, "number_of_nodes") else 1000
-                df = 1  # assume each entity seen once
+                graph_nx, node_id = self._resolve_node(graph, node_name)
+                if graph_nx is not None and hasattr(graph_nx, "number_of_edges") and hasattr(graph_nx, "degree"):
+                    n_edges = max(int(graph_nx.number_of_edges()), 1)
+                    n_nodes = max(int(graph_nx.number_of_nodes()), 1)
+                    N = max(2 * n_edges + n_nodes, 2)
+                    df = max(1, int(graph_nx.degree(node_id))) if node_id in graph_nx else 1
+                else:
+                    N = 1000
+                    df = 1
             else:
                 N = max(sum(entity_counts.values()), 1)
                 df = entity_counts.get(node_name, entity_counts.get(str(node_name).lower(), 1))

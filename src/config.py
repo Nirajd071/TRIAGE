@@ -511,23 +511,30 @@ ARM_LABELS = {
     "bm25": "BM25 RAG (top-5)",
     "dense": "Dense RAG (S-PubMedBERT, top-5)",
     "hybrid": "Hybrid BM25+Dense RAG (RRF, top-5)",
+    "reranker": "Cross-Encoder Rerank RAG (MedCPT, top-5)",
+    "graphrag": "GraphRAG (PrimeKG 2-hop + Dense, top-5)",
     "hcad": "HCAD-RAG",
     "hcad_no_decoupling": "HCAD-RAG w/o Decoupling",
     "hcad_no_gs": "HCAD-RAG w/o Soft Gram-Schmidt",
     "hcad_no_gate": "HCAD-RAG w/o Decision Gate",
+    "hcad_no_aniso": "HCAD-RAG w/o Anisotropic Weighting",
 }
 ARM_SHORT_LABELS = {
     "closed_book": BASELINE_SHORT_LABEL,
     "bm25": "BM25",
     "dense": "Dense",
     "hybrid": "Hybrid",
+    "reranker": "MedCPT-Rerank",
+    "graphrag": "GraphRAG",
     "hcad": "HCAD-RAG",
     "hcad_no_decoupling": "w/o Decoupling",
     "hcad_no_gs": "w/o Soft GS",
     "hcad_no_gate": "w/o Gate",
+    "hcad_no_aniso": "w/o Aniso",
 }
 STANDARD_ARMS = ["closed_book", "bm25", "dense", "hybrid", "hcad"]
-ABLATION_ARMS = ["hcad_no_decoupling", "hcad_no_gs", "hcad_no_gate"]
+EXTENDED_ARMS = ["closed_book", "bm25", "dense", "hybrid", "reranker", "graphrag", "hcad"]
+ABLATION_ARMS = ["hcad_no_decoupling", "hcad_no_gs", "hcad_no_gate", "hcad_no_aniso"]
 
 # Labels used by checkpoints / result files written before the renaming.
 # Readers map them onto the current labels; writers never emit them.
@@ -552,6 +559,8 @@ ABLATION_ENV = {
     "hcad_no_gs": {"HCAD_ORTHO_STRENGTH": "0.0"},
     # The JEV decision gate is bypassed after the Heaviside filter.
     "hcad_no_gate": {"HCAD_DECISION_GATE": "0"},
+    # Uniform (isotropic) feature weights instead of degree/conf/IDF blocks.
+    "hcad_no_aniso": {"HCAD_ANISO_DIM_WEIGHTING": "0"},
 }
 
 

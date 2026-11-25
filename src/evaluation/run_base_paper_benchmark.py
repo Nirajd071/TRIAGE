@@ -853,10 +853,10 @@ def build_arms(arm_ids: Sequence[str]) -> Dict[str, BenchmarkArm]:
     from src.baselines.vanilla_vector_rag import VanillaVectorRAG, build_rag_messages
 
     arms: Dict[str, BenchmarkArm] = {}
-    need_dense = bool({"dense", "hybrid", "bm25"} & set(arm_ids))
+    need_dense = bool({"dense", "hybrid", "bm25", "reranker", "graphrag"} & set(arm_ids))
     vanilla = VanillaVectorRAG() if need_dense else None
     bm25_index = None
-    if {"bm25", "hybrid"} & set(arm_ids):
+    if {"bm25", "hybrid", "reranker"} & set(arm_ids):
         from src.baselines.sparse_retrievers import BM25Index
         logger.info("Building BM25 index over the vector-store corpus...")
         bm25_index = BM25Index.from_collection(vanilla.collection)
@@ -873,15 +873,26 @@ def build_arms(arm_ids: Sequence[str]) -> Dict[str, BenchmarkArm]:
         bm25 = BM25RAG(bm25_index, top_k=RETRIEVAL_K)
         arms["bm25"] = BenchmarkArm("bm25", ARM_LABELS["bm25"], bm25.retrieve,
                                     build_rag_messages)
-    if "hybrid" in arm_ids:
+    hybrid = None
+    if {"hybrid", "reranker"} & set(arm_ids):
         from src.baselines.sparse_retrievers import HybridRAG
         hybrid = HybridRAG(bm25_index, lambda q, n: vanilla.retrieve(q, top_k=n),
                            top_k=RETRIEVAL_K)
+    if "hybrid" in arm_ids:
         arms["hybrid"] = BenchmarkArm("hybrid", ARM_LABELS["hybrid"], hybrid.retrieve,
                                       build_rag_messages)
+    if "reranker" in arm_ids:
+        from src.baselines.cross_encoder_rag import CrossEncoderRerankRAG
+        reranker = CrossEncoderRerankRAG(
+            candidate_fn=lambda q, n: hybrid.retrieve(q, top_k=n),
+            candidate_k=max(20, RETRIEVAL_K * 4),
+            top_k=RETRIEVAL_K,
+        )
+        arms["reranker"] = BenchmarkArm("reranker", ARM_LABELS["reranker"],
+                                        reranker.retrieve, build_rag_messages)
 
     hcad_ids = [a for a in arm_ids if a == "hcad" or a in ABLATION_ARMS]
-    if hcad_ids:
+    if hcad_ids or "graphrag" in arm_ids:
         from src.core.hcad_retriever import HCADRetriever
 
         hcad = HCADRetriever(fail_on_vector_error=True)
@@ -893,12 +904,25 @@ def build_arms(arm_ids: Sequence[str]) -> Dict[str, BenchmarkArm]:
                 "SciSpacy NER failed to load (BiomedicalNER in degraded regex "
                 "mode). Refusing to run base paper benchmark on degraded features."
             )
+        if "graphrag" in arm_ids:
+            from src.baselines.graph_rag import GraphRAGBaseline
+            graphrag = GraphRAGBaseline(
+                dense_retrieve_fn=lambda q, n: vanilla.retrieve(q, top_k=n),
+                encode_fn=lambda texts: vanilla.embedding_model.encode(texts, convert_to_numpy=True),
+                ner=hcad._ner,
+                entity_linker=hcad._entity_linker,
+                hypergraph=hcad.hypergraph,
+                top_k=RETRIEVAL_K,
+            )
+            arms["graphrag"] = BenchmarkArm("graphrag", ARM_LABELS["graphrag"],
+                                            graphrag.retrieve, build_rag_messages)
         for arm_id in hcad_ids:
             arms[arm_id] = BenchmarkArm(
                 arm_id, ARM_LABELS[arm_id], hcad.retrieve, hcad.build_messages,
                 env=dict(ABLATION_ENV.get(arm_id, {})),
                 stage_timings=lambda h=hcad: dict(h._last_stage_timings or {}))
-        arms["hcad"]._retriever = hcad  # type: ignore[attr-defined]
+        if "hcad" in arms:
+            arms["hcad"]._retriever = hcad  # type: ignore[attr-defined]
     return {a: arms[a] for a in arm_ids}
 
 

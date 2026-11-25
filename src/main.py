@@ -246,8 +246,8 @@ Examples:
 
     for p_ in (p_eval, p_bench, p_bp):
         p_.add_argument("--arms", default=None,
-                        help="comma list: closed_book,bm25,dense,hybrid,hcad,"
-                             "hcad_no_decoupling,hcad_no_gs,hcad_no_gate")
+                        help="comma list: closed_book,bm25,dense,hybrid,reranker,graphrag,hcad,"
+                             "hcad_no_decoupling,hcad_no_gs,hcad_no_gate,hcad_no_aniso")
         p_.add_argument("--ablations", action="store_true",
                         help="add the three HCAD component-ablation arms")
         p_.add_argument("--latency-runs", type=int, default=None,
@@ -259,9 +259,25 @@ Examples:
     p_pol.add_argument("--mode", choices=["corpus", "store"], default="corpus",
                        help="corpus: curated minimal-pair corpus; store: full KG/vector-store retrieval")
     p_pol.add_argument("--arms", default=None,
-                       help="corpus: bm25,dense,hybrid,hcad,hcad_kg; store: dense,hcad")
+                       help="corpus: bm25,dense,hybrid,reranker,rel_prefix,hcad,hcad_kg; store: dense,hcad")
     p_pol.add_argument("--k", type=int, default=None)
     p_pol.set_defaults(func=cmd_polarity)
+
+    # External benchmarks: NevIR, ExcluIR, MIRAGE
+    p_nev = subparsers.add_parser("nevir", help="NevIR negation-in-retrieval benchmark")
+    p_nev.add_argument("--n", type=int, default=300)
+    p_nev.add_argument("--arms", default="bm25,dense,hybrid,reranker,rel_prefix,hcad")
+    p_nev.set_defaults(func=cmd_nevir)
+
+    p_exc = subparsers.add_parser("excluir", help="ExcluIR exclusion-retrieval benchmark")
+    p_exc.add_argument("--n", type=int, default=300)
+    p_exc.add_argument("--arms", default="bm25,dense,hybrid,reranker,rel_prefix,hcad")
+    p_exc.set_defaults(func=cmd_excluir)
+
+    p_mir = subparsers.add_parser("mirage", help="MIRAGE MedQA + PubMedQA accuracy benchmark")
+    p_mir.add_argument("--n", type=int, default=50, help="Samples per dataset (MedQA + PubMedQA)")
+    p_mir.add_argument("--arms", default="closed_book,bm25,dense,hybrid,reranker,graphrag,hcad")
+    p_mir.set_defaults(func=cmd_mirage)
 
     # MedHallu
     p_mh = subparsers.add_parser("medhallu", help="MedHallu hallucination evaluation")
@@ -370,6 +386,24 @@ def cmd_polarity(args):
     if args.k:
         argv += ["--k", str(args.k)]
     polarity_main(argv)
+
+
+def cmd_nevir(args):
+    from src.evaluation.external_benchmarks import run_nevir_benchmark
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    run_nevir_benchmark(n=args.n, arms=arms)
+
+
+def cmd_excluir(args):
+    from src.evaluation.external_benchmarks import run_excluir_benchmark
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    run_excluir_benchmark(n=args.n, arms=arms)
+
+
+def cmd_mirage(args):
+    from src.evaluation.external_benchmarks import run_mirage_benchmark
+    arms = [a.strip() for a in args.arms.split(",") if a.strip()]
+    run_mirage_benchmark(n_per_dataset=args.n, arms=arms)
 
 
 def cmd_medhallu(args):

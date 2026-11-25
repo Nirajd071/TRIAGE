@@ -424,6 +424,48 @@ def make_hybrid_ranker(bm25: Ranker, dense: Ranker, k: int = 60) -> Ranker:
     return rank
 
 
+def prefix_relation_text(extractor, text: str) -> str:
+    """Prepend extracted relation/negation label for the simple rel-prefix baseline."""
+    kws = extractor.extract_keywords(text) or []
+    neg, cue = extractor.detect_negation(text)
+    tags = []
+    if kws:
+        tags.append(kws[0])
+    if neg and cue and cue not in tags:
+        tags.append(f"neg:{cue}")
+    return f"[{' | '.join(tags)}] {text}" if tags else text
+
+
+def make_rel_prefix_ranker(corpus: Sequence[Dict],
+                           encode: Callable[[List[str]], np.ndarray]) -> Ranker:
+    """Simple relation-phrase-prefixed dense baseline (no Gram-Schmidt)."""
+    from src.core.relation_extractor import RelationExtractor
+
+    extractor = RelationExtractor()
+    doc_vecs = np.asarray(
+        encode([prefix_relation_text(extractor, d["text"]) for d in corpus]),
+        dtype=np.float32,
+    )
+
+    def rank(q: str) -> List[str]:
+        qv = np.asarray(encode([prefix_relation_text(extractor, q)]), dtype=np.float32)[0]
+        return _rank_from_scores(corpus, doc_vecs @ qv)
+    return rank
+
+
+def make_reranker_ranker(corpus: Sequence[Dict], cross_encoder=None) -> Ranker:
+    """Biomedical Cross-Encoder (ncbi/MedCPT-Cross-Encoder) full corpus ranking."""
+    from src.baselines.cross_encoder_rag import MedCPTCrossEncoder
+
+    ce = cross_encoder or MedCPTCrossEncoder()
+    texts = [d["text"] for d in corpus]
+
+    def rank(q: str) -> List[str]:
+        scores = ce.score_pairs(q, texts)
+        return _rank_from_scores(corpus, scores)
+    return rank
+
+
 def make_hcad_ranker(corpus: Sequence[Dict], retriever=None,
                      with_kg_metadata: bool = False) -> Ranker:
     """HCAD-RAG ranking of the curated corpus (stages 1, 3, 4).
@@ -624,16 +666,19 @@ def _default_encoder():
                                       normalize_embeddings=True)
 
 
-def run_polarity_benchmark(arms: Sequence[str] = ("bm25", "dense", "hybrid", "hcad", "hcad_kg"),
+def run_polarity_benchmark(arms: Sequence[str] = ("bm25", "dense", "hybrid", "reranker", "rel_prefix", "hcad", "hcad_kg"),
                            k: int = POLARITY_TOP_K, output_path: Optional[Path] = None,
-                           encoder=None, hcad_retriever=None) -> Dict:
+                           encoder=None, hcad_retriever=None, cross_encoder=None) -> Dict:
     corpus, queries = build_corpus(), build_queries()
     rankers: Dict[str, Ranker] = {}
     bm25 = dense = None
+    enc = encoder if ({"dense", "hybrid", "rel_prefix"} & set(arms) and encoder is not None) else None
     if {"bm25", "hybrid"} & set(arms):
         bm25 = make_bm25_ranker(corpus)
+    if {"dense", "hybrid", "rel_prefix"} & set(arms) and enc is None:
+        enc = _default_encoder()
     if {"dense", "hybrid"} & set(arms):
-        dense = make_dense_ranker(corpus, encoder or _default_encoder())
+        dense = make_dense_ranker(corpus, enc)
     for arm in arms:
         if arm == "bm25":
             rankers[arm] = bm25
@@ -641,6 +686,10 @@ def run_polarity_benchmark(arms: Sequence[str] = ("bm25", "dense", "hybrid", "hc
             rankers[arm] = dense
         elif arm == "hybrid":
             rankers[arm] = make_hybrid_ranker(bm25, dense)
+        elif arm == "reranker":
+            rankers[arm] = make_reranker_ranker(corpus, cross_encoder=cross_encoder)
+        elif arm == "rel_prefix":
+            rankers[arm] = make_rel_prefix_ranker(corpus, enc)
         elif arm == "hcad":
             rankers[arm] = make_hcad_ranker(corpus, hcad_retriever, with_kg_metadata=False)
         elif arm == "hcad_kg":

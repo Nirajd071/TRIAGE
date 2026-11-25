@@ -18,7 +18,6 @@ from src.config import (
     ABLATION_ENV,
     ARM_LABELS,
     BASELINE_LABEL,
-    JUDGE_NVIDIA_MODEL,
     canonical_system_label,
     decision_gate_enabled,
     judge_ensemble_specs,
@@ -102,21 +101,9 @@ class TestConfig:
 
     def test_default_judge_ensemble(self, monkeypatch):
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
         monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
         assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q4_K_M"),
                                           ("ollama", "qwen2.5:14b-instruct-q4_K_M")]
-
-    def test_optional_api_judge(self, monkeypatch):
-        monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
-        monkeypatch.setenv("JUDGE_ENABLE_API_JUDGE", "1")
-        assert judge_ensemble_specs()[-1] == ("nvidia", JUDGE_NVIDIA_MODEL)
 
     def test_invalid_judge_spec(self, monkeypatch):
         monkeypatch.setenv("JUDGE_ENSEMBLE", "gemma2")
@@ -201,13 +188,10 @@ class TestMultiJudge:
         assert majority_vote(["A", "B"]) == "Tie"
         assert majority_vote([]) == "Tie"
 
-    def test_strict_client_refuses_silent_provider_swap(self, monkeypatch):
-        import src.config as cfg
+    def test_strict_client_refuses_non_ollama_provider(self):
         from src.core.llm_client import UnifiedLLMClient
 
-        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
-        monkeypatch.setattr(cfg, "NVIDIA_API_KEY", "")
-        with pytest.raises(RuntimeError, match="NVIDIA_API_KEY"):
+        with pytest.raises(RuntimeError, match="disabled"):
             UnifiedLLMClient(model="meta/llama-3.3-70b-instruct", provider="nvidia", strict=True)
 
     def test_chat_with_stats_reads_ollama_counters(self, monkeypatch):

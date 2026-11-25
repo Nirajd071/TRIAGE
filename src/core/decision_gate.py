@@ -76,19 +76,12 @@ def _clip_to_sentence(words: List[str], budget: int) -> str:
     cut = max(text.rfind(". "), text.rfind("! "), text.rfind("? "))
     return (text if cut == -1 else text[: cut + 1]).strip()
 
-try:
-    from typesafe_sdk import TypeSafeClient, Noul, Score, Choice
-    HAS_TYPESAFE = True
-except ImportError:
-    HAS_TYPESAFE = False
-
 class DecisionGate:
     """
-    JEV System One Decision Gate for token-efficient RAG.
-    
-    Uses TypeSafe AI's Jev (System One decision model) to evaluate candidate
-    contexts against the query, returning structured probabilistic decisions (Noul, Choice, Score)
-    to verify relevance and strictly constrain the token budget prior to prompt construction.
+    Local-calibrated Decision Gate for token-efficient RAG.
+
+    Evaluates candidate contexts via relevance floor, relation-diversity soft cap,
+    dense-anchor reservation, and sentence-boundary word-budget pruning.
     """
 
     def __init__(
@@ -97,45 +90,20 @@ class DecisionGate:
         min_relevance_score: float = 0.35,
         max_evidence_items: int = MAX_EVIDENCE_ITEMS,
         token_budget_words: int = EVIDENCE_WORD_BUDGET,
-        use_jev: bool = True,
+        use_jev: bool = False,
         max_per_relation: int = MAX_EVIDENCE_PER_RELATION,
     ):
         self.min_relevance_score = min_relevance_score
         self.max_evidence_items = max_evidence_items
         self.token_budget_words = token_budget_words
         self.max_per_relation = max_per_relation
-        self.use_jev = use_jev
-
+        self.use_jev = False
         self.client: Optional[Any] = None
-        or_fallback = (
-            os.environ.get("OPENROUTER_API_KEY")
-            if os.environ.get("TYPESAFE_USE_OPENROUTER") == "1"
-            else None
-        )
-        jev_key = api_key or os.environ.get("TYPESAFE_API_KEY") or or_fallback
-
-        if self.use_jev and HAS_TYPESAFE and jev_key:
-            try:
-                base_url = "https://openrouter.ai/api/v1" if jev_key.startswith("sk-or-") else None
-                model = "typesafe/jev-1.13" if base_url else None
-                self.client = TypeSafeClient(api_key=jev_key, base_url=base_url, model=model, timeout=30.0)
-                logger.info("JEV DecisionGate successfully initialized with TypeSafeClient.")
-            except Exception as e:
-                logger.warning(f"Failed to initialize TypeSafeClient for JEV: {e}")
-        elif not HAS_TYPESAFE:
-            logger.warning("typesafe-sdk is not installed. Run `pip install typesafe-sdk`.")
-        elif not jev_key:
-            logger.info("No TYPESAFE_API_KEY detected. JEV DecisionGate running in local calibrated mode.")
 
     @property
     def mode(self) -> str:
-        """Active gate mode: 'live-typesafe' or 'local-calibrated'.
-
-        Recorded in the benchmark run_manifest so silent mode drift between
-        runs (e.g. a TYPESAFE_API_KEY appearing in the environment) is
-        detectable in every results file.
-        """
-        return "live-typesafe" if self.client is not None else "local-calibrated"
+        """Active gate mode: always 'local-calibrated' (no external API calls)."""
+        return "local-calibrated"
 
     def verify_and_prune_candidates(
         self,
@@ -143,65 +111,11 @@ class DecisionGate:
         query: str,
     ) -> List[Dict[str, Any]]:
         """
-        Decision Primitive 1: Score & Filter (Noul).
         Prunes candidate contexts that fall below the relevance quality floor
         or duplicate already verified biomedical relations.
         """
         if not candidates:
             return []
-
-        # 1. Live JEV System One Decision (when API key is present)
-        if self.client is not None:
-            try:
-                eval_slice = candidates[:min(8, len(candidates))]
-                candidate_payload = [
-                    {"index": i, "evidence": c.get("document", "")[:250]}
-                    for i, c in enumerate(eval_slice)
-                ]
-                state = {
-                    "clinical_query": query,
-                    "candidates": candidate_payload,
-                }
-                choice_criteria = {str(i): f"Candidate context {i}" for i in range(len(candidate_payload))}
-                choice_criteria["none"] = "None of the contexts provide verifiable evidence"
-
-                questions = {
-                    "is_factually_supported": Noul(
-                        instructions="Does at least one of these candidate contexts directly provide verifiable biomedical evidence for the query?"
-                    ),
-                    "best_context_index": Choice(
-                        instructions="Which candidate index provides the highest-quality clinical answer?",
-                        criteria=choice_criteria,
-                    ),
-                }
-                decision = self.client.system_one(state=state, questions=questions)
-                answers = getattr(decision, "answers", {})
-                noul_val = answers.get("is_factually_supported")
-                choice_val = answers.get("best_context_index")
-
-                best_choice = getattr(choice_val, "choice", "none") if choice_val else "none"
-                raw_noul = getattr(noul_val, "noul", 0.0) if noul_val else 0.0
-                is_supported = float(0.0 if raw_noul is None else raw_noul)
-
-                logger.info(
-                    "JEV Decision: Supported (Noul)=%s, Best Index (Choice)=%s",
-                    is_supported,
-                    best_choice,
-                )
-                # OOD Gating: If JEV determines candidate evidence is ungrounded / unsupported,
-                # suppress noisy context so the LLM relies purely on parametric domain knowledge
-                # rather than being distracted by irrelevant biological triples.
-                if is_supported < 0.10 and best_choice == "none":
-                    logger.info("JEV OOD Gate triggered: candidates lack verifiable support. Suppressing noisy retrieval.")
-                    return []
-
-                if best_choice != "none" and str(best_choice).isdigit():
-                    best_idx = int(best_choice)
-                    if best_idx < len(candidates):
-                        selected = candidates[best_idx]
-                        candidates = [selected] + [c for i, c in enumerate(candidates) if i != best_idx]
-            except Exception as e:
-                logger.warning("JEV decision failed: %s. Continuing with calibrated gating.", e)
 
         # Relevance order is preserved (candidates arrive sorted by phi, with
         # the JEV-selected item promoted when the live gate ran). Diversity

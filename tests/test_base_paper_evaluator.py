@@ -197,37 +197,6 @@ class TestBasePaperEvaluator(unittest.TestCase):
         self.assertIs(ollama_module.chat.call_args.kwargs["think"], False)
         _cfg.JUDGE_OLLAMA_MODEL = saved  # do not pollute later tests
 
-    def test_huggingface_failure_falls_back_to_distinct_judge(self):
-        from src.config import JUDGE_HF_MODEL, JUDGE_OLLAMA_MODEL
-        from src.core.llm_client import UnifiedLLMClient
-
-        ollama_module = types.ModuleType("ollama")
-        ollama_module.chat = MagicMock(
-            return_value=types.SimpleNamespace(
-                message=types.SimpleNamespace(content='{"ok": true}')
-            )
-        )
-        with patch.dict(os.environ, {"HF_TOKEN": "test-token"}), patch.dict(
-            sys.modules, {"ollama": ollama_module}
-        ):
-            client = UnifiedLLMClient(model=JUDGE_HF_MODEL, provider="huggingface")
-            client._hf_client = MagicMock()
-            client._hf_client.chat.completions.create.side_effect = RuntimeError("offline")
-            # Kaggle may have a real Ollama HTTP server running. Force the
-            # HTTP path offline so this test reaches the mocked SDK fallback.
-            with patch("time.sleep"), patch(
-                "src.core.llm_client.requests.post", side_effect=RuntimeError("offline")
-            ):
-                response = client.chat([{"role": "user", "content": "test"}])
-
-        self.assertEqual(response, '{"ok": true}')
-        # Audit fix (item 24): fallback is per-call - the instance must NOT be
-        # permanently degraded to Ollama (a judge client previously flipped
-        # silently mid-benchmark, which is exactly what the committed artifact
-        # showed: judge qwen3:14b instead of the configured 72B).
-        self.assertEqual(client.provider, "huggingface")
-        self.assertEqual(ollama_module.chat.call_args.kwargs["model"], JUDGE_OLLAMA_MODEL)
-
     def test_failed_answer_is_not_accepted_for_scoring(self):
         from src.evaluation.run_base_paper_benchmark import _validate_generated_response
 
@@ -237,37 +206,3 @@ class TestBasePaperEvaluator(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-class TestNvidiaNimProvider(unittest.TestCase):
-    def test_nvidia_judge_and_fallback_model_routing(self):
-        from src.core.llm_client import UnifiedLLMClient
-        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvapi-test", "LLM_PROVIDER": "nvidia"}):
-            import src.config as cfg
-            cfg.NVIDIA_API_KEY = "nvapi-test"
-            client = UnifiedLLMClient(model=cfg.JUDGE_HF_MODEL, provider="nvidia")
-            self.assertEqual(client.provider, "nvidia")
-            self.assertEqual(client.model, cfg.JUDGE_NVIDIA_MODEL)  # judge routed to NIM judge model
-            gen = UnifiedLLMClient(provider="nvidia")
-            self.assertEqual(gen.model, cfg.LLM_NVIDIA_MODEL)
-
-    def test_nvidia_chat_uses_openai_compatible_endpoint(self):
-        import types as _t
-        fake_resp = _t.SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: {"choices": [{"message": {"content": '{"ok": true}'}}]},
-        )
-        import src.core.llm_client as mod
-        captured = {}
-        def fake_post(url, headers=None, json=None, timeout=None):
-            captured["url"], captured["headers"], captured["payload"] = url, headers, json
-            return fake_resp
-        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvapi-test", "LLM_PROVIDER": "nvidia"}):
-            import src.config as cfg
-            from src.core.llm_client import UnifiedLLMClient
-            cfg.NVIDIA_API_KEY = "nvapi-test"
-            client = UnifiedLLMClient(provider="nvidia")
-            with patch.object(mod.requests, "post", fake_post):
-                out = client.chat([{"role": "user", "content": "hi"}])
-        self.assertEqual(out, '{"ok": true}')
-        self.assertTrue(captured["url"].endswith("/chat/completions"))
-        self.assertEqual(captured["headers"]["Authorization"], "Bearer nvapi-test")

@@ -388,10 +388,10 @@ BM25_SYSTEM_NAME = "BM25 Lexical RAG (Llama-3.1-8B)"
 HYBRID_SYSTEM_NAME = "Hybrid BM25+Dense RAG (Llama-3.1-8B)"
 HCAD_SYSTEM_NAME = "HCAD-RAG (Full Proposed Architecture)"
 
-# LLM Configuration
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")  # "nvidia", "huggingface", or "ollama"
+# LLM Configuration (pure local Ollama; no remote LLM APIs)
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Separate judge to avoid self-preference bias
+JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Legacy alias resolved to local JUDGE_OLLAMA_MODEL
 # Local (ollama) judge. Resolved from the registry in src/judge_models.py:
 #   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > qwen2.5:72b.
 # The Kaggle notebook sets JUDGE_MODEL_INDEX; can also override via JUDGE_OLLAMA_MODEL.
@@ -408,16 +408,7 @@ JUDGE_NUM_CTX = int(os.getenv("JUDGE_NUM_CTX", "8192"))
 # the current session failed (unparseable JSON / OOM / timeouts): such a run
 # measures nothing. Checkpointed questions survive the abort.
 JUDGE_MAX_FAILURE_RATE = float(os.getenv("JUDGE_MAX_FAILURE_RATE", "0.5"))
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "")
-NVIDIA_BASE_URL = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-# Text-optimized NIM models (vision-instruct variants underperform on clinical
-# prose and waste tokens on the image tower). Override via env if needed.
-LLM_NVIDIA_MODEL = os.getenv("LLM_NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
-JUDGE_NVIDIA_MODEL = os.getenv("JUDGE_NVIDIA_MODEL", "nvidia/nemotron-3.5-lightning-30b-a3b")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hub downloads (SapBERT/S-PubMedBert) still need this
+HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hub downloads (SapBERT/S-PubMedBert) still use this
 WANDB_PROJECT = os.getenv("WANDB_PROJECT", "hcad-rag")
 WANDB_ENTITY = os.getenv("WANDB_ENTITY") or None
 WANDB_MODE = os.getenv("WANDB_MODE", "online")
@@ -582,68 +573,36 @@ def decision_gate_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Multi-judge evaluation (advisor directive). JUDGE_ENSEMBLE is a comma
-# separated list of "provider:model" specs; the first entry is the primary
-# judge. The 70B judge is an optional API judge (NVIDIA NIM by default).
+# Multi-judge evaluation (local Ollama only). JUDGE_ENSEMBLE is a comma
+# separated list of "ollama:<model>" specs; the first entry is the primary judge.
 # ---------------------------------------------------------------------------
 # Explicit 4-bit tags (registry indices 5 and 3) - same weights as Ollama's
 # default "gemma2:9b" / "qwen2.5:14b" tags, but the quantization is pinned.
 DEFAULT_JUDGE_ENSEMBLE = ("ollama:gemma2:9b-instruct-q4_K_M,"
                           "ollama:qwen2.5:14b-instruct-q4_K_M")
-OPTIONAL_API_JUDGE = f"nvidia:{JUDGE_NVIDIA_MODEL}"
 
 
 def judge_ensemble_specs() -> list[tuple[str, str]]:
-    """Parsed judge ensemble: [(provider, model), ...] (primary first).
+    """Parsed local judge ensemble: [('ollama', model), ...] (primary first).
 
-    Precedence: JUDGE_ENSEMBLE (explicit "provider:model" list) >
-    JUDGE_MODEL_INDEX (registry index/indices, quantized) > the default
-    local pair. JUDGE_ENABLE_API_JUDGE=1 appends the optional
-    Llama-3.3-70B API judge.
+    Precedence: JUDGE_ENSEMBLE (explicit "ollama:model" list) >
+    JUDGE_MODEL_INDEX (registry index/indices, quantized) > DEFAULT_JUDGE_ENSEMBLE.
     """
     raw = os.environ.get("JUDGE_ENSEMBLE", "").strip()
     if not raw:
-        # Notebook path: JUDGE_MODEL_INDEX ("2" or "0,3") -> quantized tags
-        # from the registry in src/judge_models.py.
         from src.judge_models import resolve_judge_tags
         tags = resolve_judge_tags()
         raw = ",".join(f"ollama:{t}" for t in tags) if tags else DEFAULT_JUDGE_ENSEMBLE
     specs: list[tuple[str, str]] = []
-    entries = [e.strip() for e in raw.split(",") if e.strip()]
-    if os.environ.get("JUDGE_ENABLE_API_JUDGE", "0") == "1":
-        entries.append(OPTIONAL_API_JUDGE)
-    if os.environ.get("JUDGE_ENABLE_GEMINI_JUDGE", "0") == "1":
-        if os.environ.get("GEMINI_API_KEY") and not any(e.startswith("gemini:") for e in entries):
-            raw_gemini = os.environ.get("GEMINI_JUDGE_MODELS", "").strip()
-            if raw_gemini:
-                gemini_models = [m.strip() for m in raw_gemini.split(",") if m.strip()]
-            else:
-                gemini_models = [os.environ.get("GEMINI_JUDGE_MODEL", "gemini-flash-lite-latest")]
-            for gm in gemini_models:
-                entries.append(f"gemini:{gm}")
-    if os.environ.get("JUDGE_ENABLE_OPENROUTER_JUDGE", "0") == "1":
-        if os.environ.get("OPENROUTER_API_KEY") and not any(e.startswith("openrouter:") for e in entries):
-            raw_or = os.environ.get(
-                "OPENROUTER_JUDGE_MODELS",
-                "openai/gpt-4o-mini,meta-llama/llama-3.3-70b-instruct",
-            ).strip()
-            for om in raw_or.split(","):
-                if om.strip():
-                    entries.append(f"openrouter:{om.strip()}")
-    if os.environ.get("JUDGE_ENABLE_GROQ_JUDGE", "0") == "1":
-        if os.environ.get("GROQ_API_KEY") and not any(e.startswith("groq:") for e in entries):
-            groq_model = os.environ.get("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b").strip()
-            if groq_model:
-                entries.append(f"groq:{groq_model}")
-    for entry in entries:
+    for entry in (e.strip() for e in raw.split(",") if e.strip()):
         provider, sep, model = entry.partition(":")
         if not sep or not model:
             raise ValueError(
-                f"Invalid JUDGE_ENSEMBLE entry {entry!r}: expected 'provider:model'"
+                f"Invalid JUDGE_ENSEMBLE entry {entry!r}: expected 'ollama:model'"
             )
         provider = provider.strip().lower()
-        if provider not in ("ollama", "nvidia", "huggingface", "gemini", "groq", "openrouter"):
-            raise ValueError(f"Unknown judge provider {provider!r} in {entry!r}")
+        if provider != "ollama":
+            raise ValueError(f"Unsupported judge provider {provider!r} in {entry!r} (local Ollama only)")
         spec = (provider, model.strip())
         if spec not in specs:
             specs.append(spec)

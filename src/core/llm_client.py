@@ -1,5 +1,4 @@
-"""Unified LLM client (audit fixes: no stateful provider mutation, Ollama timeout,
-honest token budgets, explicit JSON mode)."""
+"""Unified local Ollama LLM client with explicit timeout, token budgets, and JSON mode."""
 import logging
 import os
 import time
@@ -15,28 +14,8 @@ logger = logging.getLogger(__name__)
 OLLAMA_TIMEOUT_S = LLM_OLLAMA_TIMEOUT_S
 
 
-def _retry_wait_seconds(resp: Optional[requests.Response], attempt: int, base: float = 3.0) -> float:
-    """Compute exponential backoff wait time, honoring HTTP 429 Retry-After."""
-    wait_s = min(60.0, base * (2 ** attempt))
-    if resp is not None and getattr(resp, "status_code", None) == 429:
-        retry_hdr = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
-        if retry_hdr:
-            try:
-                wait_s = max(wait_s, min(65.0, float(retry_hdr) + 1.0))
-            except ValueError:
-                pass
-    return wait_s
-
 class UnifiedLLMClient:
-    """Unified LLM interface supporting Hugging Face Inference API with fallback.
-
-    Fixes applied :
-    - A transient HF failure no longer permanently mutates the instance; the
-      fallback is scoped to the failing call.
-    - Ollama calls carry an explicit timeout.
-    - `max_tokens` is honored (no silent 768 cap).
-    - JSON mode is an explicit parameter, not substring sniffing.
-    """
+    """Local Ollama LLM client for both generation and multi-judge evaluation."""
 
     def __init__(
         self,
@@ -47,37 +26,32 @@ class UnifiedLLMClient:
         strict: bool = False,
         is_judge: Optional[bool] = None,
     ):
-        """
-        Args:
-            strict: when True the client NEVER substitutes another provider
-                or model (no HF/NIM -> Ollama fallback). Judges of the
-                multi-judge ensemble are strict, so a missing API key or a
-                failed call surfaces as an error instead of silently scoring
-                with a different model under the wrong judge name.
-            is_judge: marks a judge client (larger num_ctx). Defaults to True
-                for the legacy JUDGE_HF_MODEL / "judge" aliases.
-        """
         from src.config import (
-            LLM_PROVIDER, LLM_HF_MODEL, JUDGE_HF_MODEL, JUDGE_OLLAMA_MODEL,
-            LLM_MODEL, LLM_MODEL_ALIASES, HF_TOKEN,
+            JUDGE_HF_MODEL,
+            JUDGE_OLLAMA_MODEL,
+            LLM_HF_MODEL,
+            LLM_MODEL,
+            LLM_MODEL_ALIASES,
+            LLM_PROVIDER,
         )
 
         self.strict = strict
         self.is_judge = bool(is_judge) if is_judge is not None else (
-            model == JUDGE_HF_MODEL or model == "judge")
+            model == JUDGE_HF_MODEL or model == "judge"
+        )
         self.last_usage: dict = {}
-        self.provider = (provider or os.getenv("LLM_PROVIDER") or LLM_PROVIDER).lower()
-        # Judge-specific provider override: run the generator fully local
-        # (e.g., ollama on a small GPU) while the judge uses a stronger
-        # remote model (e.g., huggingface cloud = Qwen2.5-72B-Instruct).
-        # An explicit provider kwarg always wins over the env override.
-        if not provider and (model == JUDGE_HF_MODEL or model == "judge"):
-            judge_provider = (os.getenv("JUDGE_PROVIDER") or "").strip().lower()
-            if judge_provider:
-                self.provider = judge_provider
+
+        requested_provider = (provider or os.getenv("LLM_PROVIDER") or LLM_PROVIDER).strip().lower()
+        if requested_provider and requested_provider != "ollama":
+            if strict:
+                raise RuntimeError(
+                    f"Remote LLM provider {requested_provider!r} is disabled (local Ollama only)."
+                )
+            logger.warning("Remote provider %r disabled; using local Ollama.", requested_provider)
+
+        self.provider = "ollama"
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.token = os.getenv("HF_TOKEN") or HF_TOKEN
         self.ollama_model = (
             JUDGE_OLLAMA_MODEL
             if model in (JUDGE_HF_MODEL, "judge")
@@ -85,92 +59,9 @@ class UnifiedLLMClient:
             if model is None or model in (LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
             else model
         )
-
-        if self.provider == "nvidia":
-            from src.config import NVIDIA_API_KEY, NVIDIA_BASE_URL, LLM_NVIDIA_MODEL, JUDGE_NVIDIA_MODEL
-            self.nvidia_key = os.getenv("NVIDIA_API_KEY") or NVIDIA_API_KEY
-            self.nvidia_url = (os.getenv("NVIDIA_BASE_URL") or NVIDIA_BASE_URL).rstrip("/") + "/chat/completions"
-            if model == JUDGE_HF_MODEL or model == "judge":
-                self.model = JUDGE_NVIDIA_MODEL
-            elif not model or model in (LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES):
-                self.model = LLM_NVIDIA_MODEL
-            else:
-                self.model = model
-            if not self.nvidia_key:
-                if strict:
-                    raise RuntimeError(
-                        f"NVIDIA_API_KEY is not set but strict client requested "
-                        f"nvidia:{self.model}")
-                logger.warning("NVIDIA_API_KEY not found; falling back to Ollama.")
-                self.provider = "ollama"
-                self.model = self.ollama_model
-            else:
-                return
-
-        if self.provider == "gemini":
-            from src.config import GEMINI_API_KEY
-            self.gemini_key = os.getenv("GEMINI_API_KEY") or GEMINI_API_KEY
-            ignored = (JUDGE_HF_MODEL, "judge", LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
-            self.model = model if (model and model not in ignored) else os.getenv("GEMINI_JUDGE_MODEL", "gemini-flash-lite-latest")
-            if not self.gemini_key:
-                if strict:
-                    raise RuntimeError(f"GEMINI_API_KEY is not set but strict client requested gemini:{self.model}")
-                logger.warning("GEMINI_API_KEY not found; falling back to Ollama.")
-                self.provider = "ollama"
-                self.model = self.ollama_model
-            else:
-                return
-
-        if self.provider == "groq":
-            from src.config import GROQ_API_KEY
-            self.groq_key = os.getenv("GROQ_API_KEY") or GROQ_API_KEY
-            ignored = (JUDGE_HF_MODEL, "judge", LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
-            self.model = model if (model and model not in ignored) else os.getenv("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b")
-            if not self.groq_key:
-                if strict:
-                    raise RuntimeError(f"GROQ_API_KEY is not set but strict client requested groq:{self.model}")
-                logger.warning("GROQ_API_KEY not found; falling back to Ollama.")
-                self.provider = "ollama"
-                self.model = self.ollama_model
-            else:
-                return
-
-        if self.provider == "openrouter":
-            from src.config import OPENROUTER_API_KEY
-            self.openrouter_key = os.getenv("OPENROUTER_API_KEY") or OPENROUTER_API_KEY
-            ignored = (JUDGE_HF_MODEL, "judge", LLM_MODEL, LLM_HF_MODEL, *LLM_MODEL_ALIASES)
-            self.model = model if (model and model not in ignored) else "openai/gpt-oss-120b:free"
-            if not self.openrouter_key:
-                if strict:
-                    raise RuntimeError(f"OPENROUTER_API_KEY is not set but strict client requested openrouter:{self.model}")
-                logger.warning("OPENROUTER_API_KEY not found; falling back to Ollama.")
-                self.provider = "ollama"
-                self.model = self.ollama_model
-            else:
-                return
-
-        if self.provider == "huggingface" and self.token:
-            self.model = LLM_HF_MODEL if (not model or model in (LLM_MODEL, *LLM_MODEL_ALIASES)) else model
-            try:
-                from huggingface_hub import InferenceClient
-                self._hf_client = InferenceClient(api_key=self.token, timeout=90.0)
-                return
-            except Exception as e:
-                if strict:
-                    raise RuntimeError(f"HF client unavailable for strict client: {e}") from e
-                logger.warning("Failed to initialize HF client: %s. Using Ollama.", e)
-        elif self.provider == "huggingface":
-            if strict:
-                raise RuntimeError("HF_TOKEN is not set but strict client requested huggingface")
-            logger.info("HF provider unavailable (no token) - using Ollama.")
-        elif self.provider != "ollama":
-            if strict:
-                raise RuntimeError(f"Unknown LLM provider {self.provider!r} for strict client")
-            logger.warning("Unknown LLM provider %r; falling back to Ollama.", self.provider)
-        self.provider = "ollama"
         self.model = self.ollama_model
 
-    def _ollama_options(self, temp, tokens):
+    def _ollama_options(self, temp: float, tokens: int) -> dict:
         options = {"temperature": temp, "num_predict": tokens}
         if self.is_judge:
             # Pairwise prompts carry two answers + two evidence blocks; the
@@ -179,57 +70,12 @@ class UnifiedLLMClient:
             options["num_ctx"] = JUDGE_NUM_CTX
         return options
 
-    def _chat_openai_compat(
-        self,
-        label: str,
-        url: str,
-        api_key: str,
-        messages: list[dict],
-        temp: float,
-        tokens: int,
-        json_mode: bool,
-        ollama_target: str,
-    ) -> str:
-        """Call an OpenAI-compatible chat completions endpoint with backoff and 429 Retry-After."""
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temp,
-            "max_tokens": tokens,
-        }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
-        if label == "NVIDIA" and "nemotron" in self.model.lower():
-            # Disable chain-of-thought so Nemotron doesn't burn max_tokens on reasoning_content.
-            payload["chat_template_kwargs"] = {"enable_thinking": False}
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        for attempt in range(5):
-            resp = None
-            try:
-                resp = requests.post(url, json=payload, headers=headers, timeout=60.0)
-                resp.raise_for_status()
-                data = resp.json()
-                usage = data.get("usage") or {}
-                self.last_usage = {
-                    "prompt_tokens": usage.get("prompt_tokens"),
-                    "completion_tokens": usage.get("completion_tokens"),
-                }
-                return data["choices"][0]["message"]["content"] or ""
-            except Exception as e:
-                status = getattr(resp, "status_code", None)
-                logger.warning("%s attempt %d failed: %s", label, attempt + 1, e)
-                non_retryable = status in (400, 401, 402, 403, 404, 410, 422)
-                if attempt < 4 and not non_retryable:
-                    time.sleep(_retry_wait_seconds(resp, attempt))
-                    continue
-                if self.strict:
-                    raise RuntimeError(f"{label} call failed for strict client {self.model}: {e}") from e
-                logger.warning("%s failed; falling back to Ollama (%s).", label, ollama_target)
-                return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
-        return ""
+    @staticmethod
+    def _ollama_base_url() -> str:
+        host = (os.getenv("OLLAMA_HOST") or "http://localhost:11434").strip().rstrip("/")
+        if not host.startswith(("http://", "https://")):
+            host = f"http://{host}"
+        return host
 
     def _chat_ollama(self, messages, temp, tokens, json_mode, model):
         import ollama
@@ -241,7 +87,6 @@ class UnifiedLLMClient:
             kwargs["format"] = "json"
         if is_thinking_model(model):
             kwargs["think"] = False
-        # Bounded call: the module-level ollama.chat has no timeout at all.
         _client_cls = getattr(ollama, "Client", None)
         _chat = (_client_cls(timeout=OLLAMA_TIMEOUT_S).chat
                  if _client_cls is not None else ollama.chat)
@@ -257,17 +102,12 @@ class UnifiedLLMClient:
             return (res.get("message") or {}).get("content") or ""
         return getattr(getattr(res, "message", None), "content", None) or ""
 
-    @staticmethod
-    def _ollama_base_url() -> str:
-        host = (os.getenv("OLLAMA_HOST") or "http://localhost:11434").strip().rstrip("/")
-        if not host.startswith(("http://", "https://")):
-            host = f"http://{host}"
-        return host
-
     def _chat_ollama_http(self, messages, temp, tokens, json_mode, model):
         """Timeout-guarded HTTP call (the ollama pkg has no timeout kwarg)."""
         payload = {
-            "model": model, "messages": messages, "stream": False,
+            "model": model,
+            "messages": messages,
+            "stream": False,
             "options": self._ollama_options(temp, tokens),
         }
         keep_alive = os.getenv("OLLAMA_KEEP_ALIVE", "").strip()
@@ -288,8 +128,6 @@ class UnifiedLLMClient:
             self.last_usage = _ollama_usage(data)
             return data.get("message", {}).get("content", "") or ""
         except requests.Timeout as e:
-            # The server is still busy with this request (NUM_PARALLEL=1);
-            # re-sending it via the SDK would queue the same work twice.
             raise RuntimeError(
                 f"Ollama call to {model!r} timed out after {OLLAMA_TIMEOUT_S:.0f} s"
             ) from e
@@ -298,42 +136,37 @@ class UnifiedLLMClient:
             return self._chat_ollama(messages, temp, tokens, json_mode, model)
 
     def check_ready(self) -> None:
-        """Fail fast if this client cannot answer (benchmark preflight).
+        """Fail fast if Ollama is unreachable, model is not pulled, or returns empty."""
+        try:
+            resp = requests.get(f"{self._ollama_base_url()}/api/tags", timeout=10)
+            resp.raise_for_status()
+            installed = {m.get("name") for m in resp.json().get("models", [])}
+        except Exception as e:
+            raise RuntimeError(
+                f"Ollama server is not reachable on {self._ollama_base_url()} ({e}). "
+                "Start it and retry."
+            ) from e
 
-        Without it, a judge that is not pulled or does not fit in memory
-        only shows up later as every judge call failing. Raises
-        RuntimeError with an actionable message.
-        """
-        if self.provider == "ollama":
-            try:
-                resp = requests.get(f"{self._ollama_base_url()}/api/tags", timeout=10)
-                resp.raise_for_status()
-                installed = {m.get("name") for m in resp.json().get("models", [])}
-            except Exception as e:
-                raise RuntimeError(
-                    f"Ollama server is not reachable on localhost:11434 ({e}). "
-                    "Start it (notebook: re-run the ollama cell) and retry."
-                ) from e
-            # Ollama reports untagged pulls as "<name>:latest".
-            from src.config import LLM_MODEL, LLM_MODEL_ALIASES
-            wanted = {self.model, f"{self.model}:latest"}
-            if self.model == LLM_MODEL:
-                for alias in LLM_MODEL_ALIASES:
-                    wanted.update((alias, f"{alias}:latest"))
-            if not wanted & installed:
-                raise RuntimeError(
-                    f"Model {self.model!r} is not pulled in Ollama. Run "
-                    f"`ollama pull {self.model}` (installed: "
-                    f"{', '.join(sorted(n for n in installed if n)) or 'none'})."
-                )
-            if self.model not in installed and f"{self.model}:latest" not in installed:
-                for alias in LLM_MODEL_ALIASES:
-                    for tag in (alias, f"{alias}:latest"):
-                        if tag in installed:
-                            self.model = tag
-                            break
-                    if self.model in installed:
+        from src.config import LLM_MODEL, LLM_MODEL_ALIASES
+        wanted = {self.model, f"{self.model}:latest"}
+        if self.model == LLM_MODEL:
+            for alias in LLM_MODEL_ALIASES:
+                wanted.update((alias, f"{alias}:latest"))
+        if not wanted & installed:
+            raise RuntimeError(
+                f"Model {self.model!r} is not pulled in Ollama. Run "
+                f"`ollama pull {self.model}` (installed: "
+                f"{', '.join(sorted(n for n in installed if n)) or 'none'})."
+            )
+        if self.model not in installed and f"{self.model}:latest" not in installed:
+            for alias in LLM_MODEL_ALIASES:
+                for tag in (alias, f"{alias}:latest"):
+                    if tag in installed:
+                        self.model = tag
                         break
+                if self.model in installed:
+                    break
+
         try:
             reply = self.chat(
                 [{"role": "user", "content": 'Reply with exactly this JSON: {"ok": true}'}],
@@ -341,11 +174,11 @@ class UnifiedLLMClient:
             )
         except Exception as e:
             raise RuntimeError(
-                f"{self.provider} model {self.model!r} failed a test call: {e}"
+                f"ollama model {self.model!r} failed a test call: {e}"
             ) from e
         if not (reply or "").strip():
             raise RuntimeError(
-                f"{self.provider} model {self.model!r} returned an empty reply "
+                f"ollama model {self.model!r} returned an empty reply "
                 "to a test call (out of memory, or not loaded?). Check "
                 "`ollama ps` and /tmp/ollama.log."
             )
@@ -357,146 +190,11 @@ class UnifiedLLMClient:
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
     ) -> str:
-        """Execute chat completion across Hugging Face or Ollama.
-
-        Provider fallback is scoped to this call; the instance state is never
-        mutated, so a judge client cannot silently degrade mid-benchmark.
-        """
+        """Execute local Ollama chat completion."""
         temp = temperature if temperature is not None else self.temperature
         tokens = max_tokens if max_tokens is not None else self.max_tokens
         self.last_usage = {}
-
-        ollama_target = self.model if self.provider == "ollama" else self.ollama_model
-
-        if self.provider == "nvidia":
-            return self._chat_openai_compat(
-                "NVIDIA", self.nvidia_url, self.nvidia_key,
-                messages, temp, tokens, json_mode, ollama_target,
-            )
-
-        if self.provider == "gemini":
-            candidate_models = [self.model]
-            if not self.strict and ("flash-lite" in self.model or "flash" in self.model):
-                for alt in ["gemini-flash-lite-latest", "gemini-3.5-flash-lite"]:
-                    if alt not in candidate_models:
-                        candidate_models.append(alt)
-
-            headers = {
-                "X-goog-api-key": self.gemini_key,
-                "Content-Type": "application/json",
-            }
-            contents = []
-            system_parts = []
-            for m in messages:
-                role = m.get("role", "user")
-                text = m.get("content", "")
-                if role == "system":
-                    if text:
-                        system_parts.append(text)
-                else:
-                    g_role = "user" if role == "user" else "model"
-                    contents.append({"role": g_role, "parts": [{"text": text}]})
-            system_instruction = (
-                {"parts": [{"text": "\n\n".join(system_parts)}]} if system_parts else None
-            )
-            if not contents and system_instruction:
-                contents = [{"role": "user", "parts": system_instruction["parts"]}]
-                system_instruction = None
-
-            generation_config = {
-                "temperature": temp,
-                "maxOutputTokens": tokens,
-            }
-            if json_mode:
-                generation_config["responseMimeType"] = "application/json"
-
-            payload = {"contents": contents, "generationConfig": generation_config}
-            if system_instruction:
-                payload["systemInstruction"] = system_instruction
-
-            last_err = None
-            for cur_model in candidate_models:
-                gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/{cur_model}:generateContent"
-                for attempt in range(5):
-                    resp = None
-                    try:
-                        resp = requests.post(gemini_url, json=payload, headers=headers, timeout=60.0)
-                        resp.raise_for_status()
-                        data = resp.json()
-                        usage = data.get("usageMetadata") or {}
-                        self.last_usage = {
-                            "prompt_tokens": usage.get("promptTokenCount"),
-                            "completion_tokens": usage.get("candidatesTokenCount"),
-                        }
-                        candidates = data.get("candidates") or []
-                        if candidates and "content" in candidates[0]:
-                            parts = candidates[0]["content"].get("parts") or []
-                            if parts:
-                                return parts[0].get("text") or ""
-                        return ""
-                    except Exception as e:
-                        last_err = e
-                        status = getattr(resp, "status_code", None)
-                        logger.warning("Gemini (%s) attempt %d failed: %s", cur_model, attempt + 1, e)
-                        if status in (400, 401, 402, 403, 404, 410, 422):
-                            break
-                        if attempt < 4:
-                            time.sleep(_retry_wait_seconds(resp, attempt, base=2.0))
-                logger.warning("Gemini model %s exhausted retries; trying alternate candidate if available.", cur_model)
-
-            if self.strict:
-                raise RuntimeError(f"Gemini call failed for strict client {self.model}: {last_err}") from last_err
-            else:
-                logger.warning("Gemini failed; falling back to Ollama (%s).", ollama_target)
-                return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
-
-        if self.provider == "groq":
-            return self._chat_openai_compat(
-                "Groq", "https://api.groq.com/openai/v1/chat/completions",
-                self.groq_key, messages, temp, tokens, json_mode, ollama_target,
-            )
-
-        if self.provider == "openrouter":
-            return self._chat_openai_compat(
-                "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
-                self.openrouter_key, messages, temp, tokens, json_mode, ollama_target,
-            )
-
-        if self.provider == "huggingface":
-            for attempt in range(2):
-                try:
-                    hf_kwargs = {}
-                    if json_mode:
-                        hf_kwargs["response_format"] = {"type": "json_object"}
-                    try:
-                        res = self._hf_client.chat.completions.create(
-                            model=self.model, messages=messages,
-                            max_tokens=tokens, temperature=temp, **hf_kwargs,
-                        )
-                    except TypeError:
-                        res = self._hf_client.chat.completions.create(
-                            model=self.model, messages=messages,
-                            max_tokens=tokens, temperature=temp,
-                        )
-                    usage = getattr(res, "usage", None)
-                    if usage is not None:
-                        self.last_usage = {
-                            "prompt_tokens": getattr(usage, "prompt_tokens", None),
-                            "completion_tokens": getattr(usage, "completion_tokens", None),
-                        }
-                    return res.choices[0].message.content or ""
-                except Exception as e:
-                    err = str(e)
-                    logger.warning("HF attempt %d failed: %s", attempt + 1, e)
-                    if "402" in err or "Payment Required" in err or "depleted" in err:
-                        break
-                    if attempt == 0:
-                        time.sleep(1.0)
-            if self.strict:
-                raise RuntimeError(f"HF call failed for strict client {self.model}")
-            logger.warning("Falling back to Ollama (%s) for this call only.", ollama_target)
-
-        return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+        return self._chat_ollama_http(messages, temp, tokens, json_mode, self.model)
 
     def chat_with_stats(
         self,
@@ -505,14 +203,7 @@ class UnifiedLLMClient:
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
     ) -> tuple[str, dict]:
-        """chat() plus generation-cost accounting for the latency breakdown.
-
-        Returns (text, stats): wall-clock ``t_generation`` (prefill + decode,
-        network included), prompt / generated token counts reported by the
-        provider, and decode tokens-per-second. Ollama additionally reports
-        server-side ``prefill_s`` / ``decode_s``. Token counts are None when
-        a provider does not report usage.
-        """
+        """chat() plus generation-cost accounting for the latency breakdown."""
         t0 = time.perf_counter()
         text = self.chat(messages, temperature=temperature,
                          max_tokens=max_tokens, json_mode=json_mode)

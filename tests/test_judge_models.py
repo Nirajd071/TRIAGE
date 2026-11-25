@@ -67,10 +67,6 @@ def test_ensemble_follows_judge_index(monkeypatch):
     from src.config import DEFAULT_JUDGE_ENSEMBLE, judge_ensemble_specs
 
     monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
     monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
     default = [tuple(e.split(":", 1)) for e in DEFAULT_JUDGE_ENSEMBLE.split(",")]
     assert judge_ensemble_specs() == default
@@ -204,152 +200,17 @@ def test_citation_tags_are_blinded_for_the_judge():
         "A [Doc 1] and [Doc 2, 3]."
 
 
-def test_ensemble_preflight_drops_unreachable_cloud_judge():
+def test_ensemble_preflight_fails_loudly_on_unreachable_judge():
     from src.evaluation.base_paper_evaluator import BasePaperEvaluator, MultiJudgeEvaluator
 
-    local_good, cloud_bad = MagicMock(), MagicMock()
-    cloud_bad.check_ready.side_effect = RuntimeError("503 Service Unavailable")
+    local_good, local_bad = MagicMock(), MagicMock()
+    local_bad.check_ready.side_effect = RuntimeError("model not pulled")
     panel = MultiJudgeEvaluator([
         BasePaperEvaluator(judge_llm=local_good, name="ollama:qwen3:14b-q4_K_M"),
-        BasePaperEvaluator(judge_llm=cloud_bad, name="gemini:gemini-3.1-flash-lite"),
+        BasePaperEvaluator(judge_llm=local_bad, name="ollama:gemma2:9b-instruct-q4_K_M"),
     ])
-    panel.check_ready()
-    assert panel.judge_names == ["ollama:qwen3:14b-q4_K_M"]
-
-
-def test_groq_retries_on_429_respecting_retry_after(monkeypatch):
-    import requests
-    from src.core.llm_client import UnifiedLLMClient
-
-    monkeypatch.setenv("GROQ_API_KEY", "test-key")
-    client = UnifiedLLMClient(model="qwen/qwen3.8-27b", provider="groq",
-                              strict=True, is_judge=True)
-
-    err_resp = MagicMock()
-    err_resp.status_code = 429
-    err_resp.headers = {"retry-after": "2"}
-    err_resp.raise_for_status.side_effect = requests.HTTPError("429 Too Many Requests", response=err_resp)
-
-    ok_resp = MagicMock()
-    ok_resp.status_code = 200
-    ok_resp.json.return_value = {"choices": [{"message": {"content": '{"ok": true}'}}], "usage": {}}
-
-    sleeps = []
-    with patch("src.core.llm_client.requests.post", side_effect=[err_resp, ok_resp]):
-        with patch("src.core.llm_client.time.sleep", side_effect=sleeps.append):
-            out = client.chat([{"role": "user", "content": "hi"}], json_mode=True)
-
-    assert out == '{"ok": true}'
-    assert sleeps == [3.0]  # max(base=3.0, Retry-After 2 + 1.0)
-
-
-def test_four_judge_cross_vendor_ensemble_resolution(monkeypatch):
-    from src.config import judge_ensemble_specs
-
-    monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
-    monkeypatch.setenv("JUDGE_MODEL_INDEX", "0")
-    monkeypatch.setenv("GEMINI_API_KEY", "g-key")
-    monkeypatch.setenv("JUDGE_ENABLE_GEMINI_JUDGE", "1")
-    monkeypatch.setenv("GEMINI_JUDGE_MODELS", "gemini-flash-lite-latest")
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-    monkeypatch.setenv("JUDGE_ENABLE_OPENROUTER_JUDGE", "1")
-    monkeypatch.setenv("OPENROUTER_JUDGE_MODELS", "openai/gpt-4o-mini,meta-llama/llama-3.3-70b-instruct")
-
-    assert judge_ensemble_specs() == [
-        ("ollama", "qwen3:14b-q4_K_M"),
-        ("gemini", "gemini-flash-lite-latest"),
-        ("openrouter", "openai/gpt-4o-mini"),
-        ("openrouter", "meta-llama/llama-3.3-70b-instruct"),
-    ]
-
-
-def test_multi_judge_runs_api_judges_concurrently():
-    import threading
-    from src.evaluation.base_paper_evaluator import BasePaperEvaluator, MultiJudgeEvaluator
-
-    active_threads = []
-    barrier = threading.Barrier(2, timeout=2.0)
-
-    def _make_scoring_judge(provider_name, is_barrier=False):
-        llm = MagicMock()
-        llm.provider = provider_name
-
-        def _chat(*args, **kwargs):
-            active_threads.append(threading.current_thread().name)
-            if is_barrier:
-                barrier.wait()
-            return json.dumps({
-                "comprehensiveness": 80, "diversity": 80, "empowerment": 80,
-                "logical": 80, "readability": 80, "rationale": "ok",
-            })
-
-        llm.chat.side_effect = _chat
-        return llm
-
-    panel = MultiJudgeEvaluator([
-        BasePaperEvaluator(judge_llm=_make_scoring_judge("ollama"), name="ollama:qwen3"),
-        BasePaperEvaluator(judge_llm=_make_scoring_judge("gemini", is_barrier=True), name="gemini:flash"),
-        BasePaperEvaluator(judge_llm=_make_scoring_judge("openrouter", is_barrier=True), name="openrouter:gpt-4o-mini"),
-    ])
-    res = panel.evaluate_scoring("q", "a", "ref", retries=0)
-    assert res["n_valid_judges"] == 3
-    assert list(res["per_judge"].keys()) == ["ollama:qwen3", "gemini:flash", "openrouter:gpt-4o-mini"]
-    assert res["consensus"]["overall_score"] == 80.0
-    assert len(set(active_threads)) >= 2
-
-
-def test_openai_compat_fails_fast_on_non_retryable_402(monkeypatch):
-    import requests
-    from src.core.llm_client import UnifiedLLMClient
-
-    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
-    client = UnifiedLLMClient(model="openai/gpt-4o-mini", provider="openrouter",
-                              strict=True, is_judge=True)
-
-    err_resp = MagicMock()
-    err_resp.status_code = 402
-    err_resp.headers = {}
-    err_resp.raise_for_status.side_effect = requests.HTTPError("402 Payment Required", response=err_resp)
-
-    sleeps = []
-    with patch("src.core.llm_client.requests.post", return_value=err_resp) as post_mock:
-        with patch("src.core.llm_client.time.sleep", side_effect=sleeps.append):
-            with pytest.raises(RuntimeError, match="402 Payment Required"):
-                client.chat([{"role": "user", "content": "hi"}], json_mode=True)
-
-    assert post_mock.call_count == 1
-    assert sleeps == []
-
-
-def test_nvidia_nemotron_disables_thinking_and_groq_defaults_to_gpt_oss(monkeypatch):
-    from src.config import judge_ensemble_specs
-    from src.core.llm_client import UnifiedLLMClient
-
-    monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
-    monkeypatch.delenv("GROQ_JUDGE_MODEL", raising=False)
-    monkeypatch.setenv("JUDGE_MODEL_INDEX", "0")
-    monkeypatch.setenv("GROQ_API_KEY", "g-key")
-    monkeypatch.setenv("JUDGE_ENABLE_GROQ_JUDGE", "1")
-    assert judge_ensemble_specs() == [
-        ("ollama", "qwen3:14b-q4_K_M"),
-        ("groq", "openai/gpt-oss-120b"),
-    ]
-
-    monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
-    client = UnifiedLLMClient(model="nvidia/nemotron-3.5-lightning-30b-a3b", provider="nvidia",
-                              strict=True, is_judge=True)
-    ok_resp = MagicMock()
-    ok_resp.status_code = 200
-    ok_resp.json.return_value = {"choices": [{"message": {"content": '{"ok": true}'}}], "usage": {}}
-    with patch("src.core.llm_client.requests.post", return_value=ok_resp) as post_mock:
-        assert client.chat([{"role": "user", "content": "hi"}], json_mode=True) == '{"ok": true}'
-    sent_payload = post_mock.call_args.kwargs["json"]
-    assert sent_payload["chat_template_kwargs"] == {"enable_thinking": False}
+    with pytest.raises(RuntimeError, match="model not pulled"):
+        panel.check_ready()
 
 
 def test_compact_local_four_judge_panel_and_keep_alive(monkeypatch):
@@ -357,10 +218,6 @@ def test_compact_local_four_judge_panel_and_keep_alive(monkeypatch):
     from src.core.llm_client import UnifiedLLMClient
 
     monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
-    monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
     monkeypatch.setenv("JUDGE_MODEL_INDEX", "6,7,8,9")
     monkeypatch.setenv("JUDGE_QUANT", "q4_K_M")
 
@@ -425,10 +282,7 @@ def test_audit_regression_fixes(monkeypatch, tmp_path):
     kg = SimpleNamespace(graph=g, name_to_node=g.name_to_node)
     assert AnisotropicTransformer()._compute_confidence(kg, "Metformin") == 1.0
 
-    # 4) DecisionGate does not implicitly activate OpenRouter without explicit opt-in
-    monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-    monkeypatch.delenv("TYPESAFE_USE_OPENROUTER", raising=False)
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    # 4) DecisionGate runs in local-calibrated mode
     assert DecisionGate().mode == "local-calibrated"
 
     # 5) FactIndex preserves mixed-case insertions under canonical lowercase lookup

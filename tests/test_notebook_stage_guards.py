@@ -87,7 +87,7 @@ def test_notebook_covers_revision_stages():
                 "str(N_SAMPLES)", "EXPECTED_JUDGES"):
         assert key in src[17]
     assert "--no-deps" in src[4]
-    assert "'WANDB_MODE'" in src[6] and "'TYPESAFE_API_KEY'" in src[6]
+    assert "'WANDB_MODE'" in src[6]
     assert "'50'" not in src[17] and "'50'" not in src[18]
     assert "evidence_diagnostics" in src[19]
     assert "'polarity'" in src[20] and "fresh results" in src[20]

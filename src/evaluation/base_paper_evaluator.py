@@ -680,41 +680,21 @@ class MultiJudgeEvaluator:
         return self.failures.get(name, 0) / calls if calls else 0.0
 
     def check_ready(self) -> None:
-        """Preflight every judge (pulled, loadable, answers JSON).
-
-        Raises RuntimeError naming the failing judge(s), so a missing or
-        out-of-memory judge stops the run before any generation work.
-        """
+        """Preflight every local judge (pulled, loadable, answers JSON)."""
         problems = []
-        healthy = []
         for ev in self.evaluators:
             check = getattr(ev.judge, "check_ready", None)
             if check is None:
-                healthy.append(ev)
                 continue
             try:
                 check()
                 logger.info("Judge %s preflight OK", ev.name)
-                healthy.append(ev)
             except Exception as exc:
                 problems.append(f"{ev.name}: {exc}")
-                is_cloud = ev.name.startswith(("gemini:", "groq:", "nvidia:", "huggingface:", "openrouter:"))
-                if is_cloud:
-                    logger.warning("Cloud API judge %s preflight failed: %s", ev.name, exc)
-                else:
-                    logger.error("Local judge %s preflight failed: %s", ev.name, exc)
+                logger.error("Local judge %s preflight failed: %s", ev.name, exc)
 
-        local_failures = [p for p in problems if not any(p.startswith(pfx) for pfx in ("gemini:", "groq:", "nvidia:", "huggingface:", "openrouter:"))]
-        if local_failures or not healthy:
+        if problems:
             raise RuntimeError("Judge preflight failed:\n  " + "\n  ".join(problems))
-
-        if len(healthy) < len(self.evaluators):
-            dropped = [ev.name for ev in self.evaluators if ev not in healthy]
-            logger.warning(
-                "Proceeding with %d ready judge(s) (%s); dropped unreachable API judge(s): %s",
-                len(healthy), ", ".join(ev.name for ev in healthy), ", ".join(dropped)
-            )
-            self.evaluators = healthy
 
     def _record(self, name: str, ok: bool) -> None:
         self.calls[name] = self.calls.get(name, 0) + 1

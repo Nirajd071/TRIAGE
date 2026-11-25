@@ -648,7 +648,7 @@ def judge_ensemble_specs() -> list[tuple[str, str]]:
 
 
 JUDGE_TEMPERATURE = 0.0
-JUDGE_MAX_TOKENS = 1024
+JUDGE_MAX_TOKENS = 768
 
 # ---------------------------------------------------------------------------
 # Statistics, latency and polarity benchmark parameters.

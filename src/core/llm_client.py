@@ -14,6 +14,19 @@ logger = logging.getLogger(__name__)
 
 OLLAMA_TIMEOUT_S = LLM_OLLAMA_TIMEOUT_S
 
+
+def _retry_wait_seconds(resp: Optional[requests.Response], attempt: int, base: float = 3.0) -> float:
+    """Compute exponential backoff wait time, honoring HTTP 429 Retry-After."""
+    wait_s = min(60.0, base * (2 ** attempt))
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        retry_hdr = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+        if retry_hdr:
+            try:
+                wait_s = max(wait_s, min(65.0, float(retry_hdr) + 1.0))
+            except ValueError:
+                pass
+    return wait_s
+
 class UnifiedLLMClient:
     """Unified LLM interface supporting Hugging Face Inference API with fallback.
 
@@ -160,6 +173,53 @@ class UnifiedLLMClient:
             options["num_ctx"] = JUDGE_NUM_CTX
         return options
 
+    def _chat_openai_compat(
+        self,
+        label: str,
+        url: str,
+        api_key: str,
+        messages: list[dict],
+        temp: float,
+        tokens: int,
+        json_mode: bool,
+        ollama_target: str,
+    ) -> str:
+        """Call an OpenAI-compatible chat completions endpoint with backoff and 429 Retry-After."""
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": tokens,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        for attempt in range(5):
+            resp = None
+            try:
+                resp = requests.post(url, json=payload, headers=headers, timeout=60.0)
+                resp.raise_for_status()
+                data = resp.json()
+                usage = data.get("usage") or {}
+                self.last_usage = {
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                }
+                return data["choices"][0]["message"]["content"] or ""
+            except Exception as e:
+                logger.warning("%s attempt %d failed: %s", label, attempt + 1, e)
+                if attempt < 4:
+                    time.sleep(_retry_wait_seconds(resp, attempt))
+                elif self.strict:
+                    raise RuntimeError(f"{label} call failed for strict client {self.model}: {e}") from e
+                else:
+                    logger.warning("%s failed; falling back to Ollama (%s).", label, ollama_target)
+                    return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+        return ""
+
     def _chat_ollama(self, messages, temp, tokens, json_mode, model):
         import ollama
         kwargs = {"options": self._ollama_options(temp, tokens)}
@@ -300,7 +360,7 @@ class UnifiedLLMClient:
 
         if self.provider == "gemini":
             candidate_models = [self.model]
-            if "flash-lite" in self.model or "flash" in self.model:
+            if not self.strict and ("flash-lite" in self.model or "flash" in self.model):
                 for alt in ["gemini-flash-lite-latest", "gemini-3.5-flash-lite"]:
                     if alt not in candidate_models:
                         candidate_models.append(alt)
@@ -367,83 +427,16 @@ class UnifiedLLMClient:
                 return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
 
         if self.provider == "groq":
-            groq_url = "https://api.groq.com/openai/v1/chat/completions"
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temp,
-                "max_tokens": tokens,
-            }
-            if json_mode:
-                payload["response_format"] = {"type": "json_object"}
-            headers = {
-                "Authorization": f"Bearer {self.groq_key}",
-                "Content-Type": "application/json",
-            }
-            for attempt in range(5):
-                resp = None
-                try:
-                    resp = requests.post(groq_url, json=payload, headers=headers, timeout=60.0)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    usage = data.get("usage") or {}
-                    self.last_usage = {
-                        "prompt_tokens": usage.get("prompt_tokens"),
-                        "completion_tokens": usage.get("completion_tokens"),
-                    }
-                    return data["choices"][0]["message"]["content"] or ""
-                except Exception as e:
-                    logger.warning("Groq attempt %d failed: %s", attempt + 1, e)
-                    if attempt < 4:
-                        wait_s = min(60.0, 3.0 * (2 ** attempt))
-                        if resp is not None and resp.status_code == 429:
-                            retry_hdr = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
-                            if retry_hdr:
-                                try:
-                                    wait_s = max(wait_s, min(65.0, float(retry_hdr) + 1.0))
-                                except ValueError:
-                                    pass
-                        time.sleep(wait_s)
-                    elif self.strict:
-                        raise RuntimeError(f"Groq call failed for strict client {self.model}: {e}") from e
-                    else:
-                        logger.warning("Groq failed; falling back to Ollama (%s).", ollama_target)
-                        return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+            return self._chat_openai_compat(
+                "Groq", "https://api.groq.com/openai/v1/chat/completions",
+                self.groq_key, messages, temp, tokens, json_mode, ollama_target,
+            )
 
         if self.provider == "openrouter":
-            openrouter_url = "https://openrouter.ai/api/v1/chat/completions"
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temp,
-                "max_tokens": tokens,
-            }
-            if json_mode:
-                payload["response_format"] = {"type": "json_object"}
-            headers = {
-                "Authorization": f"Bearer {self.openrouter_key}",
-                "Content-Type": "application/json",
-            }
-            for attempt in range(3):
-                try:
-                    resp = requests.post(openrouter_url, json=payload, headers=headers, timeout=60.0)
-                    resp.raise_for_status()
-                    data = resp.json()
-                    usage = data.get("usage") or {}
-                    self.last_usage = {
-                        "prompt_tokens": usage.get("prompt_tokens"),
-                        "completion_tokens": usage.get("completion_tokens"),
-                    }
-                    return data["choices"][0]["message"]["content"] or ""
-                except Exception as e:
-                    logger.warning("OpenRouter attempt %d failed: %s", attempt + 1, e)
-                    if attempt < 2:
-                        time.sleep(2.0 * (attempt + 1))
-                    elif self.strict:
-                        raise RuntimeError(f"OpenRouter call failed for strict client {self.model}: {e}") from e
-                    else:
-                        logger.warning("OpenRouter failed; falling back to Ollama (%s).", ollama_target)
-                        return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+            return self._chat_openai_compat(
+                "OpenRouter", "https://openrouter.ai/api/v1/chat/completions",
+                self.openrouter_key, messages, temp, tokens, json_mode, ollama_target,
+            )
 
         if self.provider == "huggingface":
             for attempt in range(2):

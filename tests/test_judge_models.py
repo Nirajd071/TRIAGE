@@ -69,6 +69,7 @@ def test_ensemble_follows_judge_index(monkeypatch):
     monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
     monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
     monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
     monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
     monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
     default = [tuple(e.split(":", 1)) for e in DEFAULT_JUDGE_ENSEMBLE.split(",")]
@@ -240,3 +241,60 @@ def test_groq_retries_on_429_respecting_retry_after(monkeypatch):
 
     assert out == '{"ok": true}'
     assert sleeps == [3.0]  # max(base=3.0, Retry-After 2 + 1.0)
+
+
+def test_four_judge_cross_vendor_ensemble_resolution(monkeypatch):
+    from src.config import judge_ensemble_specs
+
+    monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
+    monkeypatch.setenv("JUDGE_MODEL_INDEX", "0")
+    monkeypatch.setenv("GEMINI_API_KEY", "g-key")
+    monkeypatch.setenv("JUDGE_ENABLE_GEMINI_JUDGE", "1")
+    monkeypatch.setenv("GEMINI_JUDGE_MODELS", "gemini-flash-lite-latest")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    monkeypatch.setenv("JUDGE_ENABLE_OPENROUTER_JUDGE", "1")
+    monkeypatch.setenv("OPENROUTER_JUDGE_MODELS", "openai/gpt-4o-mini,meta-llama/llama-3.3-70b-instruct")
+
+    assert judge_ensemble_specs() == [
+        ("ollama", "qwen3:14b-q4_K_M"),
+        ("gemini", "gemini-flash-lite-latest"),
+        ("openrouter", "openai/gpt-4o-mini"),
+        ("openrouter", "meta-llama/llama-3.3-70b-instruct"),
+    ]
+
+
+def test_multi_judge_runs_api_judges_concurrently():
+    import threading
+    from src.evaluation.base_paper_evaluator import BasePaperEvaluator, MultiJudgeEvaluator
+
+    active_threads = []
+    barrier = threading.Barrier(2, timeout=2.0)
+
+    def _make_scoring_judge(provider_name, is_barrier=False):
+        llm = MagicMock()
+        llm.provider = provider_name
+
+        def _chat(*args, **kwargs):
+            active_threads.append(threading.current_thread().name)
+            if is_barrier:
+                barrier.wait()
+            return json.dumps({
+                "comprehensiveness": 80, "diversity": 80, "empowerment": 80,
+                "logical": 80, "readability": 80, "rationale": "ok",
+            })
+
+        llm.chat.side_effect = _chat
+        return llm
+
+    panel = MultiJudgeEvaluator([
+        BasePaperEvaluator(judge_llm=_make_scoring_judge("ollama"), name="ollama:qwen3"),
+        BasePaperEvaluator(judge_llm=_make_scoring_judge("gemini", is_barrier=True), name="gemini:flash"),
+        BasePaperEvaluator(judge_llm=_make_scoring_judge("openrouter", is_barrier=True), name="openrouter:gpt-4o-mini"),
+    ])
+    res = panel.evaluate_scoring("q", "a", "ref", retries=0)
+    assert res["n_valid_judges"] == 3
+    assert list(res["per_judge"].keys()) == ["ollama:qwen3", "gemini:flash", "openrouter:gpt-4o-mini"]
+    assert res["consensus"]["overall_score"] == 80.0
+    assert len(set(active_threads)) >= 2

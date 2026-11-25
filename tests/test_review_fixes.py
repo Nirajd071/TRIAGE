@@ -103,6 +103,7 @@ class TestConfig:
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
+        monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
         monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
         assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q4_K_M"),
@@ -111,6 +112,7 @@ class TestConfig:
     def test_optional_api_judge(self, monkeypatch):
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
+        monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
         monkeypatch.setenv("JUDGE_ENABLE_API_JUDGE", "1")
         assert judge_ensemble_specs()[-1] == ("nvidia", "meta/llama-3.3-70b-instruct")

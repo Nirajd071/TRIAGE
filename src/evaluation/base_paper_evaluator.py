@@ -29,7 +29,9 @@ import json
 import logging
 import math
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -667,6 +669,7 @@ class MultiJudgeEvaluator:
         names = [e.name for e in self.evaluators]
         self.calls: Dict[str, int] = {n: 0 for n in names}
         self.failures: Dict[str, int] = {n: 0 for n in names}
+        self._ollama_lock = threading.Lock()
 
     @property
     def judge_names(self) -> List[str]:
@@ -745,24 +748,49 @@ class MultiJudgeEvaluator:
                  "session_failures": self.failures.get(e.name, 0)}
                 for e in self.evaluators]
 
+    def _run_evaluators(self, worker_fn, kind: str) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Run worker_fn(ev) across all evaluators concurrently (serializing local Ollama calls)."""
+        def _invoke(ev):
+            name = getattr(ev, "name", None) or getattr(getattr(ev, "judge", None), "model", "judge")
+            is_local = (
+                getattr(getattr(ev, "judge", None), "provider", "") == "ollama"
+                or name.startswith("ollama:")
+            )
+            try:
+                if is_local:
+                    with self._ollama_lock:
+                        return name, worker_fn(ev), True, None
+                return name, worker_fn(ev), True, None
+            except Exception as exc:
+                return name, None, False, exc
+
+        if len(self.evaluators) <= 1:
+            outcomes = [_invoke(ev) for ev in self.evaluators]
+        else:
+            with ThreadPoolExecutor(max_workers=len(self.evaluators)) as pool:
+                outcomes = list(pool.map(_invoke, self.evaluators))
+
+        per_judge: Dict[str, Optional[Dict[str, Any]]] = {}
+        for name, res, ok, exc in outcomes:
+            if not ok:
+                logger.warning("Judge %s %s failed: %s", name, kind, exc)
+            per_judge[name] = res
+            self._record(name, ok)
+        return per_judge
+
     # -- scoring ---------------------------------------------------------------
     def evaluate_scoring(self, question: str, answer: str, reference_document: str,
                          answer_evidence: str = "No retrieved evidence was supplied for this answer.",
                          retries: int = 1, fallback_on_error: bool = False) -> Dict[str, Any]:
-        per_judge: Dict[str, Optional[Dict[str, Any]]] = {}
-        for ev in self.evaluators:
-            name = getattr(ev, "name", None) or getattr(getattr(ev, "judge", None), "model", "judge")
-            try:
-                raw = ev.evaluate_scoring(
-                    question, answer, reference_document,
-                    answer_evidence=answer_evidence, retries=retries,
-                    fallback_on_error=fallback_on_error)
-                per_judge[name] = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
-                self._record(name, True)
-            except Exception as exc:
-                logger.warning("Judge %s scoring failed: %s", name, exc)
-                per_judge[name] = None
-                self._record(name, False)
+        def _score_one(ev):
+            raw = ev.evaluate_scoring(
+                question, answer, reference_document,
+                answer_evidence=answer_evidence, retries=retries,
+                fallback_on_error=fallback_on_error,
+            )
+            return raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
+
+        per_judge = self._run_evaluators(_score_one, "scoring")
         valid = [r for r in per_judge.values() if r]
         consensus = (
             {d: sum(r[d] for r in valid) / len(valid) for d in SCORE_DIMENSIONS}
@@ -778,27 +806,24 @@ class MultiJudgeEvaluator:
                            evidence_b: str = "No retrieved evidence was supplied for this answer.",
                            retries: int = 1, fallback_on_error: bool = False) -> Dict[str, Any]:
         """Counterbalanced (AB + BA) comparison by every judge, then vote."""
-        per_judge: Dict[str, Optional[Dict[str, Any]]] = {}
-        for ev in self.evaluators:
-            name = getattr(ev, "name", None) or getattr(getattr(ev, "judge", None), "model", "judge")
-            try:
-                ab = ev.evaluate_selection(question, answer_a, answer_b, reference_document,
-                                           label_a=label_a, label_b=label_b,
-                                           evidence_a=evidence_a, evidence_b=evidence_b,
-                                           retries=retries, fallback_on_error=fallback_on_error)
-                ba = ev.evaluate_selection(question, answer_b, answer_a, reference_document,
-                                           label_a=label_b, label_b=label_a,
-                                           evidence_a=evidence_b, evidence_b=evidence_a,
-                                           retries=retries, fallback_on_error=fallback_on_error)
-                if isinstance(ab, dict) and "criteria_winners" in ab:
-                    per_judge[name] = merge_counterbalanced(ab, ba)
-                else:
-                    per_judge[name] = ab
-                self._record(name, True)
-            except Exception as exc:
-                logger.warning("Judge %s selection failed: %s", name, exc)
-                per_judge[name] = None
-                self._record(name, False)
+        def _select_one(ev):
+            ab = ev.evaluate_selection(
+                question, answer_a, answer_b, reference_document,
+                label_a=label_a, label_b=label_b,
+                evidence_a=evidence_a, evidence_b=evidence_b,
+                retries=retries, fallback_on_error=fallback_on_error,
+            )
+            ba = ev.evaluate_selection(
+                question, answer_b, answer_a, reference_document,
+                label_a=label_b, label_b=label_a,
+                evidence_a=evidence_b, evidence_b=evidence_a,
+                retries=retries, fallback_on_error=fallback_on_error,
+            )
+            if isinstance(ab, dict) and "criteria_winners" in ab:
+                return merge_counterbalanced(ab, ba)
+            return ab
+
+        per_judge = self._run_evaluators(_select_one, "selection")
         valid = [v for v in per_judge.values() if v]
         if valid:
             consensus = {

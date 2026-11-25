@@ -604,8 +604,22 @@ def judge_ensemble_specs() -> list[tuple[str, str]]:
         entries.append(OPTIONAL_API_JUDGE)
     if os.environ.get("JUDGE_ENABLE_GEMINI_JUDGE", "0") == "1":
         if os.environ.get("GEMINI_API_KEY") and not any(e.startswith("gemini:") for e in entries):
-            gemini_model = os.environ.get("GEMINI_JUDGE_MODEL", "gemini-flash-lite-latest")
-            entries.append(f"gemini:{gemini_model}")
+            raw_gemini = os.environ.get("GEMINI_JUDGE_MODELS", "").strip()
+            if raw_gemini:
+                gemini_models = [m.strip() for m in raw_gemini.split(",") if m.strip()]
+            else:
+                gemini_models = [os.environ.get("GEMINI_JUDGE_MODEL", "gemini-flash-lite-latest")]
+            for gm in gemini_models:
+                entries.append(f"gemini:{gm}")
+    if os.environ.get("JUDGE_ENABLE_OPENROUTER_JUDGE", "0") == "1":
+        if os.environ.get("OPENROUTER_API_KEY") and not any(e.startswith("openrouter:") for e in entries):
+            raw_or = os.environ.get(
+                "OPENROUTER_JUDGE_MODELS",
+                "openai/gpt-4o-mini,meta-llama/llama-3.3-70b-instruct",
+            ).strip()
+            for om in raw_or.split(","):
+                if om.strip():
+                    entries.append(f"openrouter:{om.strip()}")
     if os.environ.get("JUDGE_ENABLE_GROQ_JUDGE", "0") == "1":
         if os.environ.get("GROQ_API_KEY") and not any(e.startswith("groq:") for e in entries):
             entries.append("groq:qwen/qwen3.8-27b")

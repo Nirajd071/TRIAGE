@@ -298,3 +298,55 @@ def test_multi_judge_runs_api_judges_concurrently():
     assert list(res["per_judge"].keys()) == ["ollama:qwen3", "gemini:flash", "openrouter:gpt-4o-mini"]
     assert res["consensus"]["overall_score"] == 80.0
     assert len(set(active_threads)) >= 2
+
+
+def test_openai_compat_fails_fast_on_non_retryable_402(monkeypatch):
+    import requests
+    from src.core.llm_client import UnifiedLLMClient
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    client = UnifiedLLMClient(model="openai/gpt-4o-mini", provider="openrouter",
+                              strict=True, is_judge=True)
+
+    err_resp = MagicMock()
+    err_resp.status_code = 402
+    err_resp.headers = {}
+    err_resp.raise_for_status.side_effect = requests.HTTPError("402 Payment Required", response=err_resp)
+
+    sleeps = []
+    with patch("src.core.llm_client.requests.post", return_value=err_resp) as post_mock:
+        with patch("src.core.llm_client.time.sleep", side_effect=sleeps.append):
+            with pytest.raises(RuntimeError, match="402 Payment Required"):
+                client.chat([{"role": "user", "content": "hi"}], json_mode=True)
+
+    assert post_mock.call_count == 1
+    assert sleeps == []
+
+
+def test_nvidia_nemotron_disables_thinking_and_groq_defaults_to_gpt_oss(monkeypatch):
+    from src.config import judge_ensemble_specs
+    from src.core.llm_client import UnifiedLLMClient
+
+    monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_GEMINI_JUDGE", raising=False)
+    monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
+    monkeypatch.delenv("GROQ_JUDGE_MODEL", raising=False)
+    monkeypatch.setenv("JUDGE_MODEL_INDEX", "0")
+    monkeypatch.setenv("GROQ_API_KEY", "g-key")
+    monkeypatch.setenv("JUDGE_ENABLE_GROQ_JUDGE", "1")
+    assert judge_ensemble_specs() == [
+        ("ollama", "qwen3:14b-q4_K_M"),
+        ("groq", "openai/gpt-oss-120b"),
+    ]
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "nv-key")
+    client = UnifiedLLMClient(model="nvidia/nemotron-3.5-lightning-30b-a3b", provider="nvidia",
+                              strict=True, is_judge=True)
+    ok_resp = MagicMock()
+    ok_resp.status_code = 200
+    ok_resp.json.return_value = {"choices": [{"message": {"content": '{"ok": true}'}}], "usage": {}}
+    with patch("src.core.llm_client.requests.post", return_value=ok_resp) as post_mock:
+        assert client.chat([{"role": "user", "content": "hi"}], json_mode=True) == '{"ok": true}'
+    sent_payload = post_mock.call_args.kwargs["json"]
+    assert sent_payload["chat_template_kwargs"] == {"enable_thinking": False}

@@ -18,6 +18,7 @@ from src.config import (
     ABLATION_ENV,
     ARM_LABELS,
     BASELINE_LABEL,
+    JUDGE_NVIDIA_MODEL,
     canonical_system_label,
     decision_gate_enabled,
     judge_ensemble_specs,
@@ -115,7 +116,7 @@ class TestConfig:
         monkeypatch.delenv("JUDGE_ENABLE_OPENROUTER_JUDGE", raising=False)
         monkeypatch.delenv("JUDGE_ENABLE_GROQ_JUDGE", raising=False)
         monkeypatch.setenv("JUDGE_ENABLE_API_JUDGE", "1")
-        assert judge_ensemble_specs()[-1] == ("nvidia", "meta/llama-3.3-70b-instruct")
+        assert judge_ensemble_specs()[-1] == ("nvidia", JUDGE_NVIDIA_MODEL)
 
     def test_invalid_judge_spec(self, monkeypatch):
         monkeypatch.setenv("JUDGE_ENSEMBLE", "gemma2")

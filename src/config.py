@@ -589,7 +589,7 @@ def decision_gate_enabled() -> bool:
 # default "gemma2:9b" / "qwen2.5:14b" tags, but the quantization is pinned.
 DEFAULT_JUDGE_ENSEMBLE = ("ollama:gemma2:9b-instruct-q4_K_M,"
                           "ollama:qwen2.5:14b-instruct-q4_K_M")
-OPTIONAL_API_JUDGE = "nvidia:meta/llama-3.3-70b-instruct"
+OPTIONAL_API_JUDGE = f"nvidia:{JUDGE_NVIDIA_MODEL}"
 
 
 def judge_ensemble_specs() -> list[tuple[str, str]]:
@@ -631,7 +631,9 @@ def judge_ensemble_specs() -> list[tuple[str, str]]:
                     entries.append(f"openrouter:{om.strip()}")
     if os.environ.get("JUDGE_ENABLE_GROQ_JUDGE", "0") == "1":
         if os.environ.get("GROQ_API_KEY") and not any(e.startswith("groq:") for e in entries):
-            entries.append("groq:qwen/qwen3.8-27b")
+            groq_model = os.environ.get("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b").strip()
+            if groq_model:
+                entries.append(f"groq:{groq_model}")
     for entry in entries:
         provider, sep, model = entry.partition(":")
         if not sep or not model:

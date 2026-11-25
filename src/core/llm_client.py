@@ -123,7 +123,7 @@ class UnifiedLLMClient:
         if self.provider == "groq":
             from src.config import GROQ_API_KEY
             self.groq_key = os.getenv("GROQ_API_KEY") or GROQ_API_KEY
-            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else "qwen/qwen3.8-27b"
+            self.model = model if (model and model not in (JUDGE_HF_MODEL, "judge", LLM_MODEL)) else os.getenv("GROQ_JUDGE_MODEL", "openai/gpt-oss-120b")
             if not self.groq_key:
                 if strict:
                     raise RuntimeError(f"GROQ_API_KEY is not set but strict client requested groq:{self.model}")
@@ -193,6 +193,9 @@ class UnifiedLLMClient:
         }
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
+        if label == "NVIDIA" and "nemotron" in self.model.lower():
+            # Disable chain-of-thought so Nemotron doesn't burn max_tokens on reasoning_content.
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -210,14 +213,16 @@ class UnifiedLLMClient:
                 }
                 return data["choices"][0]["message"]["content"] or ""
             except Exception as e:
+                status = getattr(resp, "status_code", None)
                 logger.warning("%s attempt %d failed: %s", label, attempt + 1, e)
-                if attempt < 4:
+                non_retryable = status in (400, 401, 402, 403, 404, 410, 422)
+                if attempt < 4 and not non_retryable:
                     time.sleep(_retry_wait_seconds(resp, attempt))
-                elif self.strict:
+                    continue
+                if self.strict:
                     raise RuntimeError(f"{label} call failed for strict client {self.model}: {e}") from e
-                else:
-                    logger.warning("%s failed; falling back to Ollama (%s).", label, ollama_target)
-                    return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
+                logger.warning("%s failed; falling back to Ollama (%s).", label, ollama_target)
+                return self._chat_ollama_http(messages, temp, tokens, json_mode, ollama_target)
         return ""
 
     def _chat_ollama(self, messages, temp, tokens, json_mode, model):
@@ -298,7 +303,7 @@ class UnifiedLLMClient:
         try:
             reply = self.chat(
                 [{"role": "user", "content": 'Reply with exactly this JSON: {"ok": true}'}],
-                temperature=0.0, max_tokens=32, json_mode=True,
+                temperature=0.0, max_tokens=512, json_mode=True,
             )
         except Exception as e:
             raise RuntimeError(
@@ -330,33 +335,10 @@ class UnifiedLLMClient:
         ollama_target = self.model if self.provider == "ollama" else self.ollama_model
 
         if self.provider == "nvidia":
-            payload = {
-                "model": self.model,
-                "messages": messages,
-                "temperature": temp,
-                "max_tokens": tokens,
-            }
-            if json_mode:
-                payload["response_format"] = {"type": "json_object"}
-            headers = {
-                "Authorization": f"Bearer {self.nvidia_key}",
-                "Content-Type": "application/json",
-            }
-            try:
-                resp = requests.post(self.nvidia_url, json=payload, headers=headers, timeout=60.0)
-                resp.raise_for_status()
-                data = resp.json()
-                usage = data.get("usage") or {}
-                self.last_usage = {
-                    "prompt_tokens": usage.get("prompt_tokens"),
-                    "completion_tokens": usage.get("completion_tokens"),
-                }
-                return data["choices"][0]["message"]["content"] or ""
-            except Exception as e:
-                if self.strict:
-                    raise RuntimeError(
-                        f"NVIDIA NIM call failed for strict client {self.model}: {e}") from e
-                logger.warning("NVIDIA NIM call failed (%s); falling back to Ollama.", e)
+            return self._chat_openai_compat(
+                "NVIDIA", self.nvidia_url, self.nvidia_key,
+                messages, temp, tokens, json_mode, ollama_target,
+            )
 
         if self.provider == "gemini":
             candidate_models = [self.model]

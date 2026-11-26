@@ -203,8 +203,8 @@ Arms (one label each, used verbatim in JSON, tables and figures):
 **Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)**, BM25 RAG (top-5),
 Dense RAG (S-PubMedBERT, top-5), Hybrid BM25+Dense RAG (RRF, top-5), HCAD-RAG.
 Judges: selected locally via `JUDGE_MODEL_INDEX` (below), or an explicit
-`JUDGE_ENSEMBLE` list of `ollama:<model>` tags. The default panel is
-`ollama:gemma2:9b-instruct-q4_K_M,ollama:qwen2.5:14b-instruct-q4_K_M`.
+`JUDGE_ENSEMBLE` list of `ollama:<model>` tags. The default 4-judge panel is
+`ollama:qwen3:14b-q4_K_M,ollama:gemma3:12b-it-q4_K_M,ollama:phi4:14b-q4_K_M,ollama:mistral:7b-instruct-v0.3-q4_K_M`.
 Every call runs in JSON mode, and a judge failure never becomes a neutral
 fallback score.
 Outputs:
@@ -235,22 +235,20 @@ and every judge call in `src/` follows, with no source edits:
 | `JUDGE_MODEL_INDEX` | Judge | `q4_K_M` tag | Size |
 |---|---|---|---|
 | 0 | Qwen3-14B | `qwen3:14b-q4_K_M` | 9.3 GB |
-| 1 | DeepSeek-R1-Distill-Qwen-14B | `deepseek-r1:14b-qwen-distill-q4_K_M` | 9.0 GB |
-| 2 | Gemma 3 12B IT | `gemma3:12b-it-q4_K_M` | 8.2 GB |
-| 3 | Qwen2.5-14B-Instruct | `qwen2.5:14b-instruct-q4_K_M` | 9.0 GB |
-| 4 | Phi-4 14B | `phi4:14b-q4_K_M` | 9.1 GB |
-| 5 | Gemma 2 9B IT | `gemma2:9b-instruct-q4_K_M` | 5.8 GB |
+| 1 | Gemma 3 12B IT | `gemma3:12b-it-q4_K_M` | 8.2 GB |
+| 2 | Phi-4 14B | `phi4:14b-q4_K_M` | 9.1 GB |
+| 3 | Mistral 7B Instruct v0.3 | `mistral:7b-instruct-v0.3-q4_K_M` | 4.37 GB |
 
-- `JUDGE_MODEL_INDEX=2` selects one judge; `JUDGE_MODEL_INDEX=0,3` selects a two-judge
-  consensus panel, with Cohen's/Fleiss' kappa reported.
-- Precedence: `JUDGE_ENSEMBLE` > `JUDGE_MODEL_INDEX` > default panel.
+- `JUDGE_MODEL_INDEX=0` selects one judge; `JUDGE_MODEL_INDEX=0,1,2,3` selects the full 4-judge
+  cross-vendor consensus panel, with Cohen's/Fleiss' kappa reported.
+- Precedence: `JUDGE_ENSEMBLE` > `JUDGE_MODEL_INDEX` > default panel (indices `0,1,2,3`).
 - `JUDGE_QUANT` (default `q4_K_M`) picks the quantization; some models also
-  offer `q3_K_M`, `qat`, `q8_0` and `fp16`. An unknown index or quant fails
+  offer `qat`, `q8_0` and `fp16`. An unknown index or quant fails
   immediately with the menu.
-- **All LLMs are 4-bit**: the generator and the default panel use explicit
+- **All LLMs are 4-bit**: the generator (`llama3.1:8b-instruct-q4_K_M`) and the 4-judge panel use explicit
   `q4_K_M` tags rather than Ollama's implicit default tag.
-- Memory: judge calls send `num_ctx=8192`. Reasoning models (qwen3,
-  deepseek-r1) get `think=False`, so chain-of-thought does not consume the
+- Memory: judge calls send `num_ctx=8192`. Reasoning models (`qwen3`) get
+  `think=False`, so chain-of-thought does not consume the
   token budget or break the JSON.
 - On Kaggle the notebook exposes **only** `JUDGE_MODEL_INDEX`. The quant,
   30 questions, KV-cache `q8_0` and evidence settings are fixed so team

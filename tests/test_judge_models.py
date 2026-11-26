@@ -28,31 +28,33 @@ def test_every_registry_entry_has_default_quant():
 
 
 def test_index_and_quant_resolve_to_exact_tags():
+    assert len(JUDGE_MODELS) == 4
     assert resolve_judge_tag(0) == "qwen3:14b-q4_K_M"
-    assert resolve_judge_tag(1) == "deepseek-r1:14b-qwen-distill-q4_K_M"
-    assert resolve_judge_tag(2) == "gemma3:12b-it-q4_K_M"
-    assert resolve_judge_tag(3) == "qwen2.5:14b-instruct-q4_K_M"
+    assert resolve_judge_tag(1) == "gemma3:12b-it-q4_K_M"
+    assert resolve_judge_tag(2) == "phi4:14b-q4_K_M"
+    assert resolve_judge_tag(3) == "mistral:7b-instruct-v0.3-q4_K_M"
 
 
 def test_precedence_explicit_tag_then_index_then_default():
     assert resolve_judge_ollama_model({}) == DEFAULT_JUDGE_TAG
-    assert resolve_judge_ollama_model({"JUDGE_MODEL_INDEX": "3"}) == "qwen2.5:14b-instruct-q4_K_M"
+    assert resolve_judge_ollama_model({"JUDGE_MODEL_INDEX": "3"}) == "mistral:7b-instruct-v0.3-q4_K_M"
     assert resolve_judge_ollama_model(
-        {"JUDGE_MODEL_INDEX": "3", "JUDGE_OLLAMA_MODEL": "mistral-nemo:12b"}
-    ) == "mistral-nemo:12b"
+        {"JUDGE_MODEL_INDEX": "3", "JUDGE_OLLAMA_MODEL": "mistral:7b-instruct-v0.3-q4_K_M"}
+    ) == "mistral:7b-instruct-v0.3-q4_K_M"
 
 
 def test_multi_index_selects_a_panel():
     assert parse_indices("0, 3") == [0, 3]
     assert parse_indices(2) == [2]
-    assert parse_indices([1, 4]) == [1, 4]
+    assert parse_indices([0, 1, 2, 3]) == [0, 1, 2, 3]
     assert resolve_judge_tags({"JUDGE_MODEL_INDEX": "0,3"}) == [
-        "qwen3:14b-q4_K_M", "qwen2.5:14b-instruct-q4_K_M"]
+        "qwen3:14b-q4_K_M", "mistral:7b-instruct-v0.3-q4_K_M"]
     assert resolve_judge_tags({}) is None
 
 
 @pytest.mark.parametrize("env, match", [
     ({"JUDGE_MODEL_INDEX": "99"}, "out of range"),
+    ({"JUDGE_MODEL_INDEX": "4"}, "out of range"),
     ({"JUDGE_MODEL_INDEX": "-1"}, "out of range"),
     ({"JUDGE_MODEL_INDEX": "two"}, "must be an integer"),
     ({"JUDGE_MODEL_INDEX": "0,0"}, "twice"),
@@ -71,11 +73,11 @@ def test_ensemble_follows_judge_index(monkeypatch):
     default = [tuple(e.split(":", 1)) for e in DEFAULT_JUDGE_ENSEMBLE.split(",")]
     assert judge_ensemble_specs() == default
 
-    monkeypatch.setenv("JUDGE_MODEL_INDEX", "2")
+    monkeypatch.setenv("JUDGE_MODEL_INDEX", "1")
     assert judge_ensemble_specs() == [("ollama", "gemma3:12b-it-q4_K_M")]
-    monkeypatch.setenv("JUDGE_MODEL_INDEX", "0,5")
+    monkeypatch.setenv("JUDGE_MODEL_INDEX", "0,3")
     assert judge_ensemble_specs() == [("ollama", "qwen3:14b-q4_K_M"),
-                                      ("ollama", "gemma2:9b-instruct-q4_K_M")]
+                                      ("ollama", "mistral:7b-instruct-v0.3-q4_K_M")]
     # an explicit ensemble still wins
     monkeypatch.setenv("JUDGE_ENSEMBLE", "ollama:phi4:14b-q4_K_M")
     assert judge_ensemble_specs() == [("ollama", "phi4:14b-q4_K_M")]
@@ -83,9 +85,9 @@ def test_ensemble_follows_judge_index(monkeypatch):
 
 def test_thinking_detection_and_slug():
     assert is_thinking_model("qwen3:14b-q4_K_M")
-    assert is_thinking_model("deepseek-r1:14b-qwen-distill-q4_K_M")
-    assert not is_thinking_model("qwen2.5:14b-instruct-q4_K_M")
+    assert not is_thinking_model("phi4:14b-q4_K_M")
     assert not is_thinking_model("gemma3:12b-it-qat")
+    assert not is_thinking_model("mistral:7b-instruct-v0.3-q4_K_M")
     assert judge_slug("ollama:gemma3:12b-it-qat") == "ollama_gemma3_12b-it-qat"
 
 
@@ -207,25 +209,25 @@ def test_ensemble_preflight_fails_loudly_on_unreachable_judge():
     local_bad.check_ready.side_effect = RuntimeError("model not pulled")
     panel = MultiJudgeEvaluator([
         BasePaperEvaluator(judge_llm=local_good, name="ollama:qwen3:14b-q4_K_M"),
-        BasePaperEvaluator(judge_llm=local_bad, name="ollama:gemma2:9b-instruct-q4_K_M"),
+        BasePaperEvaluator(judge_llm=local_bad, name="ollama:gemma3:12b-it-q4_K_M"),
     ])
     with pytest.raises(RuntimeError, match="model not pulled"):
         panel.check_ready()
 
 
-def test_compact_local_four_judge_panel_and_keep_alive(monkeypatch):
+def test_four_judge_panel_and_keep_alive(monkeypatch):
     from src.config import judge_ensemble_specs
     from src.core.llm_client import UnifiedLLMClient
 
     monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-    monkeypatch.setenv("JUDGE_MODEL_INDEX", "6,7,8,9")
+    monkeypatch.setenv("JUDGE_MODEL_INDEX", "0,1,2,3")
     monkeypatch.setenv("JUDGE_QUANT", "q4_K_M")
 
     assert judge_ensemble_specs() == [
-        ("ollama", "qwen3:8b-q4_K_M"),
-        ("ollama", "gemma3:4b-it-q4_K_M"),
+        ("ollama", "qwen3:14b-q4_K_M"),
+        ("ollama", "gemma3:12b-it-q4_K_M"),
+        ("ollama", "phi4:14b-q4_K_M"),
         ("ollama", "mistral:7b-instruct-v0.3-q4_K_M"),
-        ("ollama", "phi4-mini:3.8b-q4_K_M"),
     ]
 
     captured = {}
@@ -236,7 +238,7 @@ def test_compact_local_four_judge_panel_and_keep_alive(monkeypatch):
         return _Resp({"message": {"content": '{"ok": true}'}})
 
     monkeypatch.setenv("OLLAMA_KEEP_ALIVE", "0")
-    client = UnifiedLLMClient(model="phi4-mini:3.8b-q4_K_M", provider="ollama",
+    client = UnifiedLLMClient(model="mistral:7b-instruct-v0.3-q4_K_M", provider="ollama",
                               strict=True, is_judge=True)
     with patch("src.core.llm_client.requests.post", fake_post):
         client.chat([{"role": "user", "content": "hi"}], json_mode=True)

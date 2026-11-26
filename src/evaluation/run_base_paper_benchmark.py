@@ -14,9 +14,9 @@ Every arm uses the same generator (llama3.1:8b), prompt template and
 evidence budget; arms differ only in retrieval.
 
 Outputs (results/base_paper_benchmark_results.json):
-- 5-dimension rubric scores (0-100), consensus over a judge ensemble
-  (default gemma2:9b + qwen2.5:14b; optional Llama-3.3-70B via NIM),
-  with bootstrap 95% CIs per dimension.
+- 5-dimension rubric scores (0-100), consensus over a 4-judge local Ollama
+  ensemble (Qwen3-14B, Gemma3-12B, Phi4-14B, Mistral-7B), with bootstrap 95% CIs
+  per dimension.
 - 8-criteria pairwise selection (AB + BA counterbalanced per judge,
   plurality vote across judges) as full win / tie / loss counts.
 - Significance: paired bootstrap CI of the score difference, two-sided

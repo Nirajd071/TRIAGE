@@ -644,7 +644,7 @@ def majority_vote(labels: List[str]) -> str:
 
 
 class MultiJudgeEvaluator:
-    """Ensemble of independent LLM judges (default: gemma2:9b + qwen2.5:14b).
+    """Ensemble of independent LLM judges (default: Qwen3-14B, Gemma3-12B, Phi4-14B, Mistral-7B).
 
     - Each judge scores / compares independently; per-judge verdicts are
       kept so inter-judge agreement (Cohen's / Fleiss' kappa) can be

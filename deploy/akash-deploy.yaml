@@ -14,7 +14,7 @@ services:
           all: true
     env:
       SSH_PUBKEY: "ssh-ed25519 AAAA...your-key..."
-      JUDGE_MODEL_INDEX: "0"
+      JUDGE_MODEL_INDEX: "0,1,2,3"
       WANDB_MODE: "disabled"
     params:
       storage:

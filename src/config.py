@@ -393,13 +393,20 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama")
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Legacy alias resolved to local JUDGE_OLLAMA_MODEL
 # Local (ollama) judge. Resolved from the registry in src/judge_models.py:
-#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > qwen2.5:72b.
-# The Kaggle notebook sets JUDGE_MODEL_INDEX; can also override via JUDGE_OLLAMA_MODEL.
+#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > qwen3:14b-q4_K_M.
+# Set JUDGE_MODEL_INDEX=0,1,2,3 for the full 4-judge panel.
 from src.judge_models import resolve_judge_ollama_model as _resolve_judge
 
 JUDGE_OLLAMA_MODEL = _resolve_judge()
-# Multi-Judge Panel (comma-separated list of judge models, e.g. "qwen2.5:14b,gemma2:9b")
-JUDGE_PANEL = [m.strip() for m in os.getenv("JUDGE_PANEL", f"{JUDGE_OLLAMA_MODEL},gemma2:9b").split(",") if m.strip()]
+# Multi-Judge Panel (comma-separated list of judge models)
+JUDGE_PANEL = [
+    m.strip()
+    for m in os.getenv(
+        "JUDGE_PANEL",
+        "qwen3:14b-q4_K_M,gemma3:12b-it-q4_K_M,phi4:14b-q4_K_M,mistral:7b-instruct-v0.3-q4_K_M",
+    ).split(",")
+    if m.strip()
+]
 # Judge context window. The pairwise prompt carries two answers (up to
 # LLM_MAX_TOKENS each) plus two evidence blocks; Ollama's small default
 # context silently truncates the front of the prompt (the instructions).
@@ -576,10 +583,13 @@ def decision_gate_enabled() -> bool:
 # Multi-judge evaluation (local Ollama only). JUDGE_ENSEMBLE is a comma
 # separated list of "ollama:<model>" specs; the first entry is the primary judge.
 # ---------------------------------------------------------------------------
-# Explicit 4-bit tags (registry indices 5 and 3) - same weights as Ollama's
-# default "gemma2:9b" / "qwen2.5:14b" tags, but the quantization is pinned.
-DEFAULT_JUDGE_ENSEMBLE = ("ollama:gemma2:9b-instruct-q4_K_M,"
-                          "ollama:qwen2.5:14b-instruct-q4_K_M")
+# Explicit 4-bit cross-vendor 4-judge panel (registry indices 0, 1, 2, 3)
+DEFAULT_JUDGE_ENSEMBLE = (
+    "ollama:qwen3:14b-q4_K_M,"
+    "ollama:gemma3:12b-it-q4_K_M,"
+    "ollama:phi4:14b-q4_K_M,"
+    "ollama:mistral:7b-instruct-v0.3-q4_K_M"
+)
 
 
 def judge_ensemble_specs() -> list[tuple[str, str]]:

@@ -5,18 +5,24 @@ else (src/config.py -> JUDGE_OLLAMA_MODEL -> UnifiedLLMClient ->
 BasePaperEvaluator) reads the resolved tag, so switching the judge never
 requires editing source files:
 
-    JUDGE_MODEL_INDEX=2 JUDGE_QUANT=qat python src/main.py base-paper ...
+    JUDGE_MODEL_INDEX=0,1,2,3 python src/main.py base-paper ...
+
+Judges (4 cross-vendor families, zero overlap with Llama-3.1-8B generator):
+    0 = Qwen3-14B                 (Alibaba)
+    1 = Gemma 3 12B IT            (Google)
+    2 = Phi-4 14B                 (Microsoft)
+    3 = Mistral 7B Instruct v0.3  (Mistral AI)
 
 Judge ensemble used by the benchmark (config.judge_ensemble_specs):
-    1. JUDGE_ENSEMBLE      - explicit "provider:model,..." list (unchanged)
-    2. JUDGE_MODEL_INDEX   - "2" = one judge, "0,3" = a two-judge panel,
+    1. JUDGE_ENSEMBLE      - explicit "ollama:<model>,..." list
+    2. JUDGE_MODEL_INDEX   - "0" = one judge, "0,1,2,3" = full 4-judge panel,
                              each quantized via JUDGE_QUANT (default q4_K_M)
     3. DEFAULT_JUDGE_ENSEMBLE in config.py
 
 Legacy single-judge tag (config.JUDGE_OLLAMA_MODEL):
     JUDGE_OLLAMA_MODEL (exact tag) > first JUDGE_MODEL_INDEX > DEFAULT_JUDGE_TAG
 
-Only the JUDGE is affected; the generator (llama3.1:8b, Q4_K_M) is untouched.
+Only the JUDGE is affected; the generator (llama3.1:8b-instruct-q4_K_M) is untouched.
 
 Kept dependency-free on purpose: the Kaggle notebook kernel imports it
 directly (different Python than the project env) to print the menu and
@@ -31,12 +37,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 DEFAULT_QUANT = "q4_K_M"
-DEFAULT_JUDGE_TAG = "qwen2.5:72b"
+DEFAULT_JUDGE_TAG = "qwen3:14b-q4_K_M"
 
 # Model families that emit chain-of-thought unless told not to. Thinking
 # tokens eat the judge's token budget and break JSON parsing, so the client
 # sends think=False for these.
-THINKING_FAMILIES = ("qwen3", "deepseek-r1")
+THINKING_FAMILIES = ("qwen3",)
 
 
 @dataclass(frozen=True)
@@ -64,19 +70,9 @@ JUDGE_MODELS: List[JudgeModel] = [
             "fp16": "qwen3:14b-fp16",
         },
         sizes_gb={"q4_K_M": 9.3, "q8_0": 16.0, "fp16": 30.0},
-        note="thinking disabled automatically",
+        note="Alibaba; thinking disabled automatically",
     ),
     JudgeModel(  # 1
-        name="DeepSeek-R1-Distill-Qwen-14B",
-        quants={
-            "q4_K_M": "deepseek-r1:14b-qwen-distill-q4_K_M",
-            "q8_0": "deepseek-r1:14b-qwen-distill-q8_0",
-            "fp16": "deepseek-r1:14b-qwen-distill-fp16",
-        },
-        sizes_gb={"q4_K_M": 9.0, "q8_0": 16.0, "fp16": 30.0},
-        note="reasoning model; thinking disabled automatically",
-    ),
-    JudgeModel(  # 2
         name="Gemma 3 12B IT",
         quants={
             "qat": "gemma3:12b-it-qat",
@@ -85,23 +81,9 @@ JUDGE_MODELS: List[JudgeModel] = [
             "fp16": "gemma3:12b-it-fp16",
         },
         sizes_gb={"qat": 8.9, "q4_K_M": 8.2, "q8_0": 13.0, "fp16": 24.0},
-        note="'qat' = Google's quantization-aware 4-bit, best 4-bit quality",
+        note="Google; 'qat' = quantization-aware 4-bit",
     ),
-    JudgeModel(  # 3
-        name="Qwen2.5-14B-Instruct",
-        quants={
-            "q3_K_M": "qwen2.5:14b-instruct-q3_K_M",
-            "q4_K_M": "qwen2.5:14b-instruct-q4_K_M",
-            "q5_K_M": "qwen2.5:14b-instruct-q5_K_M",
-            "q6_K": "qwen2.5:14b-instruct-q6_K",
-            "q8_0": "qwen2.5:14b-instruct-q8_0",
-            "fp16": "qwen2.5:14b-instruct-fp16",
-        },
-        sizes_gb={"q3_K_M": 7.3, "q4_K_M": 9.0, "q5_K_M": 11.0,
-                  "q6_K": 12.0, "q8_0": 16.0, "fp16": 30.0},
-        note="previous project default judge",
-    ),
-    JudgeModel(  # 4
+    JudgeModel(  # 2
         name="Phi-4 14B",
         quants={
             "q4_K_M": "phi4:14b-q4_K_M",
@@ -109,57 +91,16 @@ JUDGE_MODELS: List[JudgeModel] = [
             "fp16": "phi4:14b-fp16",
         },
         sizes_gb={"q4_K_M": 9.1, "q8_0": 16.0, "fp16": 29.0},
+        note="Microsoft; STEM/clinical reasoning",
     ),
-    JudgeModel(  # 5
-        name="Gemma 2 9B IT",
-        quants={
-            "q3_K_M": "gemma2:9b-instruct-q3_K_M",
-            "q4_K_M": "gemma2:9b-instruct-q4_K_M",
-            "q5_K_M": "gemma2:9b-instruct-q5_K_M",
-            "q6_K": "gemma2:9b-instruct-q6_K",
-            "q8_0": "gemma2:9b-instruct-q8_0",
-            "fp16": "gemma2:9b-instruct-fp16",
-        },
-        sizes_gb={"q3_K_M": 4.8, "q4_K_M": 5.8, "q5_K_M": 6.6,
-                  "q6_K": 7.6, "q8_0": 9.8, "fp16": 18.0},
-        note="smallest / fastest option",
-    ),
-    JudgeModel(  # 6
-        name="Qwen3-8B",
-        quants={
-            "q4_K_M": "qwen3:8b-q4_K_M",
-            "q8_0": "qwen3:8b-q8_0",
-        },
-        sizes_gb={"q4_K_M": 5.23, "q8_0": 8.9},
-        note="compact local Qwen3; thinking disabled automatically",
-    ),
-    JudgeModel(  # 7
-        name="Gemma 3 4B IT",
-        quants={
-            "qat": "gemma3:4b-it-qat",
-            "q4_K_M": "gemma3:4b-it-q4_K_M",
-            "q8_0": "gemma3:4b-it-q8_0",
-        },
-        sizes_gb={"qat": 4.01, "q4_K_M": 3.35, "q8_0": 5.0},
-        note="compact Google judge; 'qat' = quantization-aware 4-bit",
-    ),
-    JudgeModel(  # 8
+    JudgeModel(  # 3
         name="Mistral 7B Instruct v0.3",
         quants={
             "q4_K_M": "mistral:7b-instruct-v0.3-q4_K_M",
             "q8_0": "mistral:7b-instruct-v0.3-q8_0",
         },
         sizes_gb={"q4_K_M": 4.37, "q8_0": 7.7},
-        note="compact Mistral-family local judge",
-    ),
-    JudgeModel(  # 9
-        name="Phi-4 Mini 3.8B",
-        quants={
-            "q4_K_M": "phi4-mini:3.8b-q4_K_M",
-            "q8_0": "phi4-mini:3.8b-q8_0",
-        },
-        sizes_gb={"q4_K_M": 2.49, "q8_0": 4.1},
-        note="ultra-compact Microsoft judge (fits 4 GB VRAM)",
+        note="Mistral AI; compact 4th family (smallest/fastest)",
     ),
 ]
 
@@ -193,7 +134,7 @@ def _parse_index(raw: str) -> int:
 def parse_indices(raw) -> List[int]:
     """JUDGE_MODEL_INDEX value -> list of registry indices.
 
-    Accepts an int, "2", "0,3" or [0, 3]; one index = one judge, several =
+    Accepts an int, "1", "0,3" or [0, 1, 2, 3]; one index = one judge, several =
     a multi-judge consensus panel. Duplicates are rejected.
     """
     if isinstance(raw, bool):

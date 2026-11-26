@@ -24,6 +24,6 @@ def test_judge_ensemble_specs_returns_local_ollama_only(monkeypatch):
     specs = judge_ensemble_specs()
     assert specs == [
         ("ollama", "qwen3:14b-q4_K_M"),
-        ("ollama", "qwen2.5:14b-instruct-q4_K_M"),
+        ("ollama", "mistral:7b-instruct-v0.3-q4_K_M"),
     ]
     assert all(prov == "ollama" for prov, _ in specs)

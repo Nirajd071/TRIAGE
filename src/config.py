@@ -116,7 +116,7 @@ MAX_EVIDENCE_PER_RELATION = 3
 # complement", so the comparison with dense RAG isolates what the
 # structured selection adds. HCAD_DENSE_ANCHOR_K=0 restores legacy selection.
 DENSE_ANCHOR_K = 1
-DENSE_ANCHOR_MIN = 0.40
+DENSE_ANCHOR_MIN = 0.48
 
 
 def dense_anchor_k() -> int:
@@ -131,6 +131,29 @@ def dense_anchor_min() -> float:
         return float(os.environ.get("HCAD_DENSE_ANCHOR_MIN", DENSE_ANCHOR_MIN))
     except ValueError:
         return DENSE_ANCHOR_MIN
+
+
+# Lexical overlap blend inside the dense/hybrid base (0 = pure dense; active
+# only when dense_weight() > 0). Keeps exact gold entities/terms at Rank 1.
+LEX_WEIGHT = 0.20
+
+
+def lex_weight() -> float:
+    try:
+        val = float(os.environ.get("HCAD_LEX_WEIGHT", LEX_WEIGHT))
+    except ValueError:
+        val = LEX_WEIGHT
+    return min(1.0, max(0.0, val))
+
+
+# Explicit polarity/negation/exclusion conflict scoring (active when
+# dense_weight() > 0; set HCAD_POLARITY_SCORING=0 to disable for ablation).
+POLARITY_SCORING = True
+
+
+def polarity_scoring_enabled() -> bool:
+    default = "1" if POLARITY_SCORING else "0"
+    return os.environ.get("HCAD_POLARITY_SCORING", default) == "1"
 
 
 # Hyperedge rendering: KG triples sharing (head, relation) are emitted as ONE

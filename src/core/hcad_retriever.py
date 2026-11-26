@@ -28,8 +28,10 @@ from src.config import (
     dense_anchor_k,
     dense_anchor_min,
     dense_weight,
+    lex_weight,
     map_query_relation,
     map_relation_text,
+    polarity_scoring_enabled,
     presence_masking_enabled,
 )
 from src.data.triple_text import canonical_direction, triple_to_sentence
@@ -546,12 +548,17 @@ class HCADRetriever:
         return candidates[:CANDIDATE_POOL_MAX]
 
     @staticmethod
-    def _dense_anchors(candidates: list[dict], dense, phi_scores) -> list[dict]:
+    def _dense_anchors(
+        candidates: list[dict],
+        dense,
+        phi_scores,
+        pol_adj=None,
+    ) -> list[dict]:
         """Top-K candidates by full-text cosine that clear the anchor floor.
 
-        Only dense-channel (vector) hits qualify; anchors keep their hybrid
-        score as phi_final and are flagged so the decision gate does not
-        re-reject them for the structural missing-channel prior.
+        Only dense-channel (vector) hits without a polarity conflict qualify;
+        anchors keep their hybrid score as phi_final and are flagged so the
+        decision gate does not re-reject them for the structural missing-channel prior.
         """
         k_anchor = dense_anchor_k()
         if k_anchor <= 0 or dense is None or len(candidates) == 0:
@@ -563,12 +570,15 @@ class HCADRetriever:
         order = np.argsort(-dense, kind="stable")
         anchors: list[dict] = []
         for i in order:
-            if len(anchors) >= k_anchor or dense[i] < floor:
+            idx = int(i)
+            if len(anchors) >= k_anchor or dense[idx] < floor:
                 break
-            cand = candidates[int(i)]
+            if pol_adj is not None and float(pol_adj[idx]) < 0.0:
+                continue
+            cand = candidates[idx]
             if cand.get("source") != "vector" or not cand.get("document"):
                 continue
-            anchors.append({**cand, "phi_final": float(phi_scores[int(i)]), "anchor": True})
+            anchors.append({**cand, "phi_final": float(phi_scores[idx]), "anchor": True})
         return anchors
 
     def _dense_similarities(self, query: str, candidates: list[dict]) -> np.ndarray:
@@ -770,15 +780,35 @@ class HCADRetriever:
 
         # Hybrid score: the decoupled channels compare short extracted
         # fragments, so on their own they discard the full-text semantic
-        # match. Phi = w_d * dense + (1 - w_d) * Phi_struct keeps the dense
-        # ranking as a floor and lets the E/R/M channels re-rank on top.
+        # match. Phi = w_d * base + (1 - w_d) * Phi_struct + pol_adj blends
+        # dense cosine + normalized in-pool BM25 overlap with E/R/M channels
+        # and applies polarity/exclusion conflict scoring.
         phi_struct = np.asarray(phi_scores, dtype=np.float32)
         w_d = dense_weight()
         if w_d > 0.0:
+            from src.core.polarity_scorer import polarity_adjustments, pool_bm25_normalized
+
             dense = self._dense_similarities(query, candidates)
+            w_lex = lex_weight()
+            if w_lex > 0.0:
+                lex = pool_bm25_normalized(query, candidate_docs)
+                semantic_base = (1.0 - w_lex) * dense + w_lex * lex
+            else:
+                semantic_base = dense
+            phi_scores = (w_d * semantic_base + (1.0 - w_d) * phi_struct).astype(np.float32)
+            if polarity_scoring_enabled():
+                pol_adj = polarity_adjustments(
+                    query,
+                    candidate_docs,
+                    [c.get("metadata") for c in candidates],
+                )
+                phi_scores = (phi_scores + pol_adj).astype(np.float32)
+            else:
+                pol_adj = None
         else:
             dense = np.zeros(len(candidates), dtype=np.float32)
-        phi_scores = (w_d * dense + (1.0 - w_d) * phi_struct).astype(np.float32)
+            pol_adj = None
+            phi_scores = phi_struct
         for ctx, s_struct, s_dense in zip(candidates, phi_struct, dense):
             ctx["phi_struct"] = float(s_struct)
             ctx["dense_score"] = float(s_dense)
@@ -811,7 +841,7 @@ class HCADRetriever:
         # are always part of the evidence; the structure-ranked survivors
         # complement them. Anchors keep their hybrid-score position; the
         # decision gate guarantees them a slot and budget.
-        anchors = self._dense_anchors(candidates, dense, phi_scores)
+        anchors = self._dense_anchors(candidates, dense, phi_scores, pol_adj=pol_adj)
         if anchors:
             anchor_docs = {a["document"] for a in anchors}
             filtered = sorted(

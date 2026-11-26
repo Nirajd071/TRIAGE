@@ -403,6 +403,7 @@ def run_mirage_benchmark(
                     contexts = arm.retrieve(sample["retrieval_query"]) if arm.retrieve else []
                     msgs = arm.build_messages(sample["question"], contexts)
                 raw = llm.chat(msgs, temperature=0.0, max_tokens=96)
+                ret_abstained = bool(arm.retrieve is not None and len(contexts) == 0)
                 abstained = bool(_ABSTENTION_PAT.search(raw or ""))
                 pred = "X" if abstained else _extract_answer_letter(raw)
                 correct = int(pred == sample["gold_letter"])
@@ -410,6 +411,7 @@ def run_mirage_benchmark(
                     "pred": pred,
                     "correct": correct,
                     "abstained": int(abstained),
+                    "retrieval_abstained": int(ret_abstained),
                 }
             rec = {
                 "id": sample["id"],
@@ -432,6 +434,7 @@ def run_mirage_benchmark(
     for arm_id in arms:
         acc_all = [r["results"][arm_id]["correct"] for r in rows]
         abst_all = [r["results"][arm_id]["abstained"] for r in rows]
+        ret_abst_all = [r["results"][arm_id].get("retrieval_abstained", 0) for r in rows]
         by_ds = {}
         for ds_name in ("MedQA-USMLE", "PubMedQA"):
             sub = [r["results"][arm_id]["correct"] for r in rows if r["dataset"] == ds_name]
@@ -440,6 +443,7 @@ def run_mirage_benchmark(
         summary_arms[arm_id] = {
             "overall_accuracy": bootstrap_ci(acc_all),
             "abstention_rate": bootstrap_ci(abst_all),
+            "retrieval_abstention_rate": bootstrap_ci(ret_abst_all),
             "by_dataset": by_ds,
         }
 

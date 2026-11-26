@@ -361,8 +361,10 @@ def _hcad_config_id() -> str:
         dense_weight,
         expansion_rule,
         group_kg_facts_enabled,
+        lex_weight,
         ortho_strength,
         decision_gate_enabled,
+        polarity_scoring_enabled,
         presence_masking_enabled,
         relation_vocab_enabled,
         tau_sat,
@@ -370,6 +372,7 @@ def _hcad_config_id() -> str:
     t_mode = os.getenv("HCAD_TENSOR_MODE", "static").strip().lower()
     return (
         f"evidence-v3|gen={LLM_MODEL}|dw={dense_weight():g}"
+        f"|lw={lex_weight():g}|pol={int(polarity_scoring_enabled())}"
         f"|anchor={dense_anchor_k()}@{dense_anchor_min():g}"
         f"|group={int(group_kg_facts_enabled())}|tm={t_mode}"
         f"|tau={tau_sat()}|exp={expansion_rule()}"

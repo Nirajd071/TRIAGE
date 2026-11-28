@@ -8,6 +8,7 @@ from src.core.polarity_scorer import (
     extract_exclusion_terms,
     polarity_adjustments,
     pool_bm25_normalized,
+    strip_exclusion_terms,
 )
 from src.evaluation.polarity_benchmark import build_corpus, build_queries
 
@@ -45,6 +46,25 @@ def test_exclusion_query_penalizes_affirmative_excluded_entity():
     assert adj[0] > adj[1]
     assert adj[2] > adj[1]
 
+    for broader in (
+        "Asthma options other than corticosteroids",
+        "Asthma regimens rather than steroids",
+        "Therapies that do not involve chemotherapy",
+    ):
+        terms = extract_exclusion_terms(broader)
+        assert terms
+        stripped = strip_exclusion_terms(broader, terms)
+        for t in terms:
+            assert t not in stripped.lower()
+
+
+def test_clause_level_negation_separates_both_negated_twins():
+    q = "Which therapy does not lower blood pressure?"
+    doc_gold = "Drug A elevates glucose, and it does not lower blood pressure."
+    doc_opp = "Drug A does not elevate glucose, while it lowers blood pressure strongly."
+    adj = polarity_adjustments(q, [doc_gold, doc_opp])
+    assert adj[0] > adj[1]
+
 
 def test_short_claim_negation_alignment_ignores_long_prose():
     q_neg = "Aspirin does not prevent this viral complication."
@@ -75,7 +95,7 @@ def test_dense_anchors_skip_polarity_conflicting_vector_hit(monkeypatch):
     from src.core.hcad_retriever import HCADRetriever
 
     monkeypatch.setenv("HCAD_DENSE_ANCHOR_K", "1")
-    monkeypatch.setenv("HCAD_DENSE_ANCHOR_MIN", "0.48")
+    monkeypatch.setenv("HCAD_DENSE_ANCHOR_MIN", "0.58")
 
     cands = [
         {"document": "Metformin is contraindicated in renal failure.", "source": "vector"},
@@ -92,12 +112,21 @@ def test_dense_anchors_skip_polarity_conflicting_vector_hit(monkeypatch):
 
 
 def test_config_toggles_and_anchor_floor(monkeypatch):
-    from src.config import DENSE_ANCHOR_MIN, lex_weight, polarity_scoring_enabled
+    from src.config import (
+        DENSE_ANCHOR_MIN,
+        GATE_MIN_RELEVANCE,
+        gate_min_relevance,
+        lex_weight,
+        polarity_scoring_enabled,
+    )
 
     monkeypatch.delenv("HCAD_DENSE_ANCHOR_MIN", raising=False)
+    monkeypatch.delenv("HCAD_GATE_MIN_SCORE", raising=False)
     monkeypatch.delenv("HCAD_LEX_WEIGHT", raising=False)
     monkeypatch.delenv("HCAD_POLARITY_SCORING", raising=False)
-    assert DENSE_ANCHOR_MIN == pytest.approx(0.48)
+    assert DENSE_ANCHOR_MIN == pytest.approx(0.58)
+    assert GATE_MIN_RELEVANCE == pytest.approx(0.52)
+    assert gate_min_relevance() == pytest.approx(0.52)
     assert lex_weight() == pytest.approx(0.20)
     assert polarity_scoring_enabled() is True
 

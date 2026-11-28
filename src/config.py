@@ -116,7 +116,7 @@ MAX_EVIDENCE_PER_RELATION = 3
 # complement", so the comparison with dense RAG isolates what the
 # structured selection adds. HCAD_DENSE_ANCHOR_K=0 restores legacy selection.
 DENSE_ANCHOR_K = 1
-DENSE_ANCHOR_MIN = 0.48
+DENSE_ANCHOR_MIN = 0.58
 
 
 def dense_anchor_k() -> int:
@@ -131,6 +131,17 @@ def dense_anchor_min() -> float:
         return float(os.environ.get("HCAD_DENSE_ANCHOR_MIN", DENSE_ANCHOR_MIN))
     except ValueError:
         return DENSE_ANCHOR_MIN
+
+
+# DecisionGate minimum relevance floor before fallback/abstention.
+GATE_MIN_RELEVANCE = 0.52
+
+
+def gate_min_relevance() -> float:
+    try:
+        return float(os.environ.get("HCAD_GATE_MIN_SCORE", GATE_MIN_RELEVANCE))
+    except ValueError:
+        return GATE_MIN_RELEVANCE
 
 
 # Lexical overlap blend inside the dense/hybrid base (0 = pure dense; active

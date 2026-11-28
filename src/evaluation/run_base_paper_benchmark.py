@@ -360,6 +360,7 @@ def _hcad_config_id() -> str:
         dense_anchor_min,
         dense_weight,
         expansion_rule,
+        gate_min_relevance,
         group_kg_facts_enabled,
         lex_weight,
         ortho_strength,
@@ -378,6 +379,7 @@ def _hcad_config_id() -> str:
         f"|tau={tau_sat()}|exp={expansion_rule()}"
         f"|mask={int(presence_masking_enabled())}|rv={int(relation_vocab_enabled())}"
         f"|ortho={ortho_strength():g}|gate={int(decision_gate_enabled())}"
+        f"|gmin={gate_min_relevance():g}"
     )
 
 

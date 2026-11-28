@@ -28,6 +28,7 @@ from src.config import (
     dense_anchor_k,
     dense_anchor_min,
     dense_weight,
+    gate_min_relevance,
     lex_weight,
     map_query_relation,
     map_relation_text,
@@ -183,7 +184,8 @@ class HCADRetriever:
         self._filter = StatisticalFilter(k=self.k)
         self._prompt_builder = PromptBuilder()
         self._decision_gate = DecisionGate(
-            min_relevance_score=0.25, max_evidence_items=MAX_EVIDENCE_ITEMS
+            min_relevance_score=gate_min_relevance(),
+            max_evidence_items=MAX_EVIDENCE_ITEMS,
         )
 
         try:
@@ -786,12 +788,25 @@ class HCADRetriever:
         phi_struct = np.asarray(phi_scores, dtype=np.float32)
         w_d = dense_weight()
         if w_d > 0.0:
-            from src.core.polarity_scorer import polarity_adjustments, pool_bm25_normalized
+            from src.core.polarity_scorer import (
+                extract_exclusion_terms,
+                has_general_negation,
+                polarity_adjustments,
+                pool_bm25_normalized,
+                strip_exclusion_terms,
+            )
 
             dense = self._dense_similarities(query, candidates)
             w_lex = lex_weight()
+            excl_terms = extract_exclusion_terms(query)
+            if excl_terms or (len(candidates) <= 10 and has_general_negation(query)):
+                # Never give BM25 credit for excluded terms or swap-negation pairs
+                bm25_q = strip_exclusion_terms(query, excl_terms) if excl_terms else ""
+                w_lex = 0.0 if (len(candidates) <= 10 or not bm25_q) else w_lex
+            else:
+                bm25_q = query
             if w_lex > 0.0:
-                lex = pool_bm25_normalized(query, candidate_docs)
+                lex = pool_bm25_normalized(bm25_q, candidate_docs)
                 semantic_base = (1.0 - w_lex) * dense + w_lex * lex
             else:
                 semantic_base = dense
